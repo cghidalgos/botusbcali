@@ -1,0 +1,28 @@
+{
+  "name": "bottelegram",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js --ext js,json --watch src",
+    "set:webhook": "node scripts/setWebhook.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.0",
+    "cheerio": "^1.2.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.2",
+    "exceljs": "^4.4.0",
+    "express": "^4.18.2",
+    "mammoth": "^1.11.0",
+    "multer": "^1.4.5-lts.1",
+    "openai": "^4.8.0",
+    "pdf-parse": "^1.1.1",
+    "telegraf": "^4.11.0",
+    "word-extractor": "^1.0.4"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
+}

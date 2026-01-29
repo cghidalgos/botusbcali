@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Control de Bot GPT</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header>
+      <p>Operación</p>
+      <h1>Bot de la Facultad de Ingeniería</h1>
+      <p>
+        Define en qué contexto responde, sube documentos complementarios y sigue el
+        pulso...
+      </p>
+    </header>
+    <main>
+      <section class="panel">
+        <h2>Contexto de conversación</h2>
+        <form id="context-form">
+          <label for="activePrompt">Prompt base</label>
+          <textarea id="activePrompt" name="activePrompt" required></textarea>
+          <label for="additionalNotes">Notas adicionales</label>
+          <textarea id="additionalNotes" name="additionalNotes"></textarea>
+          <label for="promptTemplate">Plantilla de prompt (opcional)</label>
+          <textarea
+            id="promptTemplate"
+            name="promptTemplate"
+            placeholder="Usa {activePrompt}, {additionalNotes}, {documentNotes}, {incomingText}"
+          ></textarea>
+          <button type="submit">Guardar contexto</button>
+        </form>
+        <div class="context-preview" id="context-preview">
+          <h3>Contexto guardado</h3>
+          <p class="preview-label">Prompt base</p>
+          <p id="preview-prompt" class="preview-content">Cargando…</p>
+          <p class="preview-label">Notas adicionales</p>
+          <p id="preview-notes" class="preview-content">Cargando…</p>
+          <p class="preview-label">Plantilla de prompt</p>
+          <p id="preview-template" class="preview-content">Cargando…</p>
+          <button type="button" id="edit-context-btn">Editar contexto</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Documentos de referencia</h2>
+        <form id="doc-upload-form">
+          <label for="docFile">Selecciona un archivo (PDF, Word, Excel, CSV)</label>
+          <input
+            type="file"
+            id="docFile"
+            name="document"
+            accept=".pdf,.doc,.docx,.xlsx,.csv,.html,.htm"
+            required
+          />
+          <label for="docSummary">Resumen / etiquetas</label>
+          <input type="text" id="docSummary" name="summary" placeholder="¿Qué contiene?" />
+          <button type="submit">Subir documento</button>
+        </form>
+        <form id="doc-url-form" class="inline-form">
+          <label for="docUrl">Descargar PDF desde URL</label>
+          <input
+            type="url"
+            id="docUrl"
+            name="url"
+            placeholder="https://ejemplo.com/informe.pdf"
+            required
+          />
+          <label for="docUrlSummary">Resumen / etiquetas (opcional)</label>
+          <input type="text" id="docUrlSummary" name="summary" placeholder="Ingresa datos clave" />
+          <button type="submit">Descargar y procesar</button>
+        </form>
+        <form id="doc-web-form" class="inline-form">
+          <label for="webUrl">Cargar página web como conocimiento</label>
+          <input
+            type="url"
+            id="webUrl"
+            name="url"
+            placeholder="https://usbcali.edu.co/facultad/ingenieria/"
+            required
+          />
+          <label for="webDepth">Profundidad de enlaces <span class="help-tooltip" data-tooltip="Cuántos niveles de enlaces internos seguirá desde la página inicial. 0 = solo esa página, 1 = incluye enlaces directos, 2 = enlaces de enlaces, etc.">?</span></label>
+          <input type="number" id="webDepth" name="depth" min="0" max="3" value="0" />
+          <label for="webMaxPages">Máximo de páginas <span class="help-tooltip" data-tooltip="Límite total de páginas a extraer para evitar recorridos demasiado grandes. Se detiene al llegar a este número.">?</span></label>
+          <input type="number" id="webMaxPages" name="maxPages" min="1" max="50" value="1" />
+          <label for="webUrlSummary">Resumen / etiquetas (opcional)</label>
+          <input type="text" id="webUrlSummary" name="summary" placeholder="Ingresa datos clave" />
+          <button type="submit">Extraer y guardar</button>
+        </form>
+        <form id="doc-html-form" class="inline-form">
+          <label for="htmlTitle">Título (opcional)</label>
+          <input type="text" id="htmlTitle" name="title" placeholder="Nombre del HTML" />
+          <label for="htmlSummary">Resumen / etiquetas (opcional)</label>
+          <input type="text" id="htmlSummary" name="summary" placeholder="Ingresa datos clave" />
+          <label for="htmlContent">Pegar HTML</label>
+          <textarea
+            id="htmlContent"
+            name="html"
+            rows="6"
+            placeholder="Pega aquí el código HTML completo"
+            required
+          ></textarea>
+          <button type="submit">Guardar HTML</button>
+        </form>
+        <div class="documents" id="documents-list"></div>
+      </section>
+
+      <section class="panel" id="log-panel">
+        <h2>Actividad</h2>
+        <div id="log"></div>
+      </section>
+
+      <section class="panel" id="history-panel">
+        <h2>Historial de preguntas y respuestas</h2>
+        <button id="clear-history-btn" type="button">Limpiar historial</button>
+        <div id="qa-history"></div>
+      </section>
+    </main>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
