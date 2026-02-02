@@ -1,0 +1,13 @@
+services:
+  botusbcali:
+    build: .
+    ports:
+      - "9014:3000"
+    env_file:
+      - .env
+    environment:
+      - PORT=3000
+    volumes:
+      - ./data:/app/data
+      - ./uploads:/app/uploads
+    restart: unless-stopped

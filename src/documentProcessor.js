@@ -141,10 +141,20 @@ async function extractHtmlText(filePath) {
   const title = $("title").text().trim();
   const description = $("meta[name='description']").attr("content")?.trim();
   const bodyText = $("body").text().replace(/\s+/g, " ").trim();
+  const links = [];
+  $("a[href]").each((_, element) => {
+    const href = $(element).attr("href")?.trim();
+    if (!href) return;
+    const text = $(element).text().replace(/\s+/g, " ").trim();
+    links.push(`${text || "Enlace"}: ${href}`);
+  });
+  const uniqueLinks = Array.from(new Set(links)).slice(0, 200);
+  const linksBlock = uniqueLinks.length ? `Enlaces:\n${uniqueLinks.join("\n")}` : "";
   const pieces = [
     title ? `Título: ${title}` : "",
     description ? `Descripción: ${description}` : "",
     bodyText,
+    linksBlock,
   ].filter(Boolean);
   return pieces.join("\n\n");
 }

@@ -9,19 +9,25 @@ const client = process.env.OPENAI_API_KEY
 
 const EMBEDDING_MODEL = process.env.OPENAI_EMBEDDING_MODEL || "text-embedding-3-small";
 
-export function chunkText(text, chunkSize = 1400, overlap = 200, maxChunks = 200) {
+export function chunkText(text, chunkSize, overlap, maxChunks) {
+  const resolvedChunkSize =
+    chunkSize ?? Number.parseInt(process.env.EMBEDDING_CHUNK_SIZE || "1400", 10);
+  const resolvedOverlap =
+    overlap ?? Number.parseInt(process.env.EMBEDDING_CHUNK_OVERLAP || "200", 10);
+  const resolvedMaxChunks =
+    maxChunks ?? Number.parseInt(process.env.EMBEDDING_MAX_CHUNKS || "600", 10);
   const cleaned = String(text || "").replace(/\s+/g, " ").trim();
   if (!cleaned) return [];
   const chunks = [];
   let start = 0;
-  while (start < cleaned.length && chunks.length < maxChunks) {
-    const end = Math.min(start + chunkSize, cleaned.length);
+  while (start < cleaned.length && chunks.length < resolvedMaxChunks) {
+    const end = Math.min(start + resolvedChunkSize, cleaned.length);
     const chunk = cleaned.slice(start, end).trim();
     if (chunk) {
       chunks.push(chunk);
     }
     if (end >= cleaned.length) break;
-    start = Math.max(end - overlap, 0);
+    start = Math.max(end - resolvedOverlap, 0);
   }
   return chunks;
 }

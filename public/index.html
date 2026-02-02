@@ -103,6 +103,21 @@
           ></textarea>
           <button type="submit">Guardar HTML</button>
         </form>
+        <form id="doc-text-form" class="inline-form">
+          <label for="textTitle">Título (opcional)</label>
+          <input type="text" id="textTitle" name="title" placeholder="Nombre del texto" />
+          <label for="textSummary">Resumen / etiquetas (opcional)</label>
+          <input type="text" id="textSummary" name="summary" placeholder="Ingresa datos clave" />
+          <label for="textContent">Texto plano</label>
+          <textarea
+            id="textContent"
+            name="text"
+            rows="6"
+            placeholder="Pega aquí el texto en limpio"
+            required
+          ></textarea>
+          <button type="submit">Guardar texto</button>
+        </form>
         <div class="documents" id="documents-list"></div>
       </section>
 

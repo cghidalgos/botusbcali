@@ -35,6 +35,11 @@ dotenv.config();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const uploadsPath = path.join(__dirname, "..", "uploads");
+try {
+  fs.mkdirSync(uploadsPath, { recursive: true });
+} catch (error) {
+  console.error("No se pudo crear el directorio uploads", error);
+}
 const upload = multer({ dest: uploadsPath });
 
 const app = express();
@@ -82,7 +87,7 @@ function telegramNotConfigured(res) {
   });
 }
 
-function extractTextFromHtml(html) {
+function extractTextFromHtml(html, baseUrl = null) {
   const $ = load(html);
   $("script, style, noscript, iframe, svg, canvas, nav, footer, header, form").remove();
 
@@ -148,11 +153,33 @@ function extractTextFromHtml(html) {
     ? `Cuerpo docente:\n${uniqueTeachers.join("\n")}`
     : "";
 
+  const links = [];
+  $("a[href]").each((_, element) => {
+    const href = $(element).attr("href")?.trim();
+    if (!href) return;
+    if (href.startsWith("#") || href.startsWith("mailto:") || href.startsWith("tel:")) {
+      return;
+    }
+    let resolved = href;
+    if (baseUrl) {
+      try {
+        resolved = new URL(href, baseUrl).toString();
+      } catch {
+        resolved = href;
+      }
+    }
+    const text = $(element).text().replace(/\s+/g, " ").trim();
+    links.push(`${text || "Enlace"}: ${resolved}`);
+  });
+  const uniqueLinks = Array.from(new Set(links)).slice(0, 200);
+  const linksBlock = uniqueLinks.length ? `Enlaces:\n${uniqueLinks.join("\n")}` : "";
+
   const pieces = [
     title ? `Título: ${title}` : "",
     description ? `Descripción: ${description}` : "",
     teacherBlock,
     filtered,
+    linksBlock,
   ].filter(Boolean);
   return pieces.join("\n\n");
 }
@@ -217,7 +244,7 @@ async function crawlWebsite({ startUrl, maxDepth, maxPages }) {
         continue;
       }
       const html = String(response.data ?? "");
-      const text = extractTextFromHtml(html);
+      const text = extractTextFromHtml(html, url);
       if (text) {
         results.push({ url, text });
       }
@@ -469,7 +496,7 @@ app.post("/api/documents/web", async (req, res) => {
       }
 
       const html = String(response.data ?? "");
-      const extractedText = extractTextFromHtml(html);
+      const extractedText = extractTextFromHtml(html, normalizedUrl.toString());
       if (!extractedText) {
         return res.status(400).json({ error: "No se pudo extraer texto de la página." });
       }
@@ -555,7 +582,7 @@ app.post("/api/documents/html", async (req, res) => {
   }
 
   try {
-    const extractedText = extractTextFromHtml(html);
+    const extractedText = extractTextFromHtml(html, null);
     if (!extractedText) {
       return res.status(400).json({ error: "No se pudo extraer texto del HTML." });
     }

@@ -33,6 +33,10 @@ const docHtmlForm = document.getElementById("doc-html-form");
 const htmlTitleInput = document.getElementById("htmlTitle");
 const htmlSummaryInput = document.getElementById("htmlSummary");
 const htmlContentInput = document.getElementById("htmlContent");
+const docTextForm = document.getElementById("doc-text-form");
+const textTitleInput = document.getElementById("textTitle");
+const textSummaryInput = document.getElementById("textSummary");
+const textContentInput = document.getElementById("textContent");
 const qaHistoryContainer = document.getElementById("qa-history");
 const clearHistoryBtn = document.getElementById("clear-history-btn");
 function renderHistory(history) {
@@ -471,6 +475,52 @@ docHtmlForm?.addEventListener("submit", async (event) => {
     docHtmlForm.reset();
   } catch (error) {
     appendLog("Error al guardar HTML: " + error.message, "error");
+  } finally {
+    if (submitButton) {
+      submitButton.disabled = false;
+      submitButton.textContent = originalButtonText;
+    }
+  }
+});
+
+docTextForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const text = textContentInput.value.trim();
+  if (!text) {
+    appendLog("Pega el texto antes de guardar.", "error");
+    return;
+  }
+
+  const submitButton = docTextForm.querySelector("button[type=submit]");
+  const originalButtonText = submitButton ? submitButton.textContent : "";
+  if (submitButton) {
+    submitButton.disabled = true;
+    submitButton.textContent = "Guardando...";
+  }
+
+  const html = `<pre>${escapeHtml(text)}</pre>`;
+  const payload = {
+    title: textTitleInput.value.trim() || "Texto plano",
+    summary: textSummaryInput.value.trim(),
+    html,
+  };
+
+  try {
+    const response = await fetch("/api/documents/html", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.error || "No se pudo guardar el texto.");
+    }
+    const documents = await response.json();
+    renderDocuments(documents);
+    appendLog("Texto guardado y procesado", "success");
+    docTextForm.reset();
+  } catch (error) {
+    appendLog("Error al guardar texto: " + error.message, "error");
   } finally {
     if (submitButton) {
       submitButton.disabled = false;
