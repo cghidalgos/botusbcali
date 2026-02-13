@@ -70,6 +70,28 @@ const broadcastUpload = multer({
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "5mb" }));
+
+// Support deployment under a subpath: if WEBHOOK_BASE has a pathname (e.g. https://host/botusbcali),
+// allow requests that include that prefix by stripping it before routing.
+const _APP_BASE_PATH = (function () {
+  try {
+    const bp = process.env.WEBHOOK_BASE ? new URL(process.env.WEBHOOK_BASE).pathname : "";
+    return String(bp || "").replace(/\/$/, "");
+  } catch (e) {
+    return "";
+  }
+})();
+if (_APP_BASE_PATH) {
+  app.use((req, res, next) => {
+    if (req.url === _APP_BASE_PATH) {
+      req.url = "/";
+    } else if (req.url.startsWith(_APP_BASE_PATH + "/")) {
+      req.url = req.url.slice(_APP_BASE_PATH.length) || "/";
+    }
+    return next();
+  });
+}
+
 app.use(express.static(path.join(__dirname, "..", "public")));
 
 // API: historial de preguntas y respuestas
