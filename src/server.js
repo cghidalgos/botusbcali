@@ -1073,6 +1073,14 @@ app.delete("/api/documents/:id", async (req, res) => {
   res.json(listDocumentsForClient());
 });
 
+// SPA fallback — return index.html for non-API routes so the UI works when served under a subpath
+app.get('*', (req, res, next) => {
+  const wantsJson =
+    req.path.startsWith('/api/') || req.path === '/send-broadcast' || req.path === '/webhook' || req.path.startsWith('/uploads/') || req.path.endsWith('.map');
+  if (wantsJson) return next();
+  return res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
+});
+
 app.use((error, req, res, next) => {
   if (!error) return next();
 
