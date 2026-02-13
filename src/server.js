@@ -732,7 +732,11 @@ app.post(
   "/api/documents",
   upload.single("document"),
   async (req, res) => {
+    // debugging/logging: help diagnose proxy vs backend upload problems
+    console.log(`[uploads] incoming /api/documents from ip=${req.ip || req.socket?.remoteAddress || 'unknown'} content-length=${req.headers['content-length'] || 'n/a'} content-type=${req.headers['content-type'] || 'n/a'}`);
+
     if (!req.file) {
+      console.log('[uploads] no req.file present after multipart handling — possible proxy buffering/limit or client aborted upload');
       return res.status(400).json({ error: "No document uploaded." });
     }
 
