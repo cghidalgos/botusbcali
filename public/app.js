@@ -1188,15 +1188,90 @@ docUploadForm.addEventListener("submit", async (event) => {
   formData.append("document", file);
   formData.append("summary", document.getElementById("docSummary").value);
 
+  // Helper: poll /api/documents until we find the uploaded file (by originalName or size)
+  const pollForDocument = (fileName, fileSize, timeoutMs = 90000) =>
+    new Promise((resolve, reject) => {
+      const start = Date.now();
+      let stopped = false;
+
+      const checkOnce = async () => {
+        try {
+          const res = await fetch("api/documents");
+          if (!res.ok) return null;
+          const docs = await res.json();
+          const found = Array.isArray(docs)
+            ? docs.find(
+                (d) =>
+                  (d.originalName === fileName) ||
+                  (d.size && Number(d.size) === Number(fileSize) && String(d.originalName || "").includes(String(fileName).split(".").slice(0, -1).join(".")))
+              )
+            : null;
+          if (found) return resolve(docs);
+        } catch (e) {
+          // ignore transient errors
+        }
+
+        if (Date.now() - start > timeoutMs) {
+          stopped = true;
+          return reject(new Error("timeout"));
+        }
+        // schedule next check
+        if (!stopped) setTimeout(checkOnce, DOCUMENT_POLL_INTERVAL);
+      };
+
+      // start
+      checkOnce();
+    });
+
+  // State used to detect client-side completion and start polling if server response stalls
+  let xhrResolved = false;
+  let fallbackTimer = null;
+  let pollingUsed = false;
+
   try {
-    const result = await xhrJson({
+    const resultPromise = xhrJson({
       url: "api/documents",
       method: "POST",
       body: formData,
       onUploadProgress: (loaded, total) => {
-        progress.set((loaded / total) * 100);
+        const pct = (loaded / total) * 100;
+        progress.set(pct);
+        // when client upload finishes but server response hasn't arrived, start polling after a short delay
+        if (pct >= 99.999 && !fallbackTimer && !xhrResolved) {
+          fallbackTimer = setTimeout(async () => {
+            // give the server a moment, then poll for the new document
+            appendLog("Carga completada en cliente; comprobando documentos en el servidor...", "info");
+            try {
+              pollingUsed = true;
+              const docs = await pollForDocument(file.name, file.size, 90000);
+              progress.set(100);
+              renderDocuments(docs);
+              appendLog("Documento confirmado por polling", "success");
+              docUploadForm.reset();
+            } catch (err) {
+              appendLog(
+                "No se confirmó la subida tras esperar. Revisa el servidor o reintenta.",
+                "error"
+              );
+            }
+          }, 3000); // start polling 3s after client upload reaches 100%
+        }
       },
     });
+
+    const result = await resultPromise;
+    xhrResolved = true;
+    if (fallbackTimer) {
+      clearTimeout(fallbackTimer);
+      fallbackTimer = null;
+    }
+
+    // if polling already confirmed the document, ignore duplicate XHR response
+    if (pollingUsed) {
+      appendLog("Respuesta del servidor recibida (ya confirmada por polling)", "info");
+      return;
+    }
+
     progress.set(100);
 
     if (!result.ok) {
@@ -1213,8 +1288,16 @@ docUploadForm.addEventListener("submit", async (event) => {
     appendLog("Documento subido", "success");
     docUploadForm.reset();
   } catch (error) {
-    appendLog("Error al subir documento: " + error.message, "error");
+    // if polling already succeeded, treat as success; otherwise show error
+    if (pollingUsed) {
+      return;
+    }
+    appendLog("Error al subir documento: " + (error?.message || error), "error");
   } finally {
+    if (fallbackTimer) {
+      clearTimeout(fallbackTimer);
+      fallbackTimer = null;
+    }
     fileInput.disabled = false;
     progress.finish();
   }
