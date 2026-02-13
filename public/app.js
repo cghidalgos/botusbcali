@@ -131,13 +131,35 @@ function xhrJson({ url, method = "POST", headers = {}, body, onUploadProgress })
       const status = xhr.status;
       const ok = status >= 200 && status < 300;
 
-      let data = xhr.response;
-      if (data == null && xhr.responseText) {
-        try {
-          data = JSON.parse(xhr.responseText);
-        } catch {
-          data = null;
+      // Safely read JSON response; avoid accessing responseText when responseType !== ''/"text"
+      let data = null;
+      try {
+        data = xhr.response;
+      } catch (e) {
+        data = null;
+      }
+
+      try {
+        if ((data === null || data === undefined) && (xhr.responseType === "" || xhr.responseType === "text")) {
+          const text = xhr.responseText;
+          if (text) {
+            try {
+              data = JSON.parse(text);
+            } catch {
+              data = text;
+            }
+          }
         }
+      } catch (e) {
+        // accessing responseText can throw in some browsers when responseType !== 'text'
+      }
+
+      // Provide a clearer client-side message for 413 when server/proxy does not include JSON body
+      if ((data === null || data === undefined) && status === 413) {
+        data = {
+          error:
+            "Payload demasiado grande (HTTP 413). Puede ser el límite del backend o de un proxy/reverse-proxy delante del servidor.",
+        };
       }
 
       resolve({ ok, status, data });
