@@ -1,5 +1,20 @@
 
 const DOCUMENT_POLL_INTERVAL = 6000;
+
+// Base path helper so the app works when served under a subpath (e.g. /botusbcali/)
+const APP_BASE_PATH = (function () {
+  const baseTag = document.querySelector('base')?.getAttribute('href');
+  const p = (baseTag || window.location.pathname || "").replace(/\/$/, "");
+  return p === "/" ? "" : p;
+})();
+
+function withBase(rel) {
+  if (!rel) return rel;
+  if (/^https?:\/\//i.test(rel) || rel.startsWith("//")) return rel;
+  const cleaned = String(rel).replace(/^\/+/, "");
+  return (APP_BASE_PATH ? APP_BASE_PATH + "/" : "/") + cleaned;
+}
+
 const STATUS_LABELS = {
   uploaded: "Subido",
   processing: "Procesando",
@@ -183,7 +198,7 @@ let historyCache = [];
 
 async function loadHistory() {
   try {
-    const res = await fetch("api/history");
+    const res = await fetch(withBase("api/history"));
     const data = await res.json();
     historyCache = Array.isArray(data) ? data : [];
     renderHistory(historyCache);
@@ -199,7 +214,7 @@ if (clearHistoryBtn) {
     progress.start();
     const stopSimulated = startSimulatedProgress((p) => progress.set(p));
     try {
-      await fetch("api/history/clear", { method: "POST" });
+      await fetch(withBase("api/history/clear"), { method: "POST" });
       await loadHistory();
       stopSimulated();
       progress.set(100);
@@ -474,7 +489,7 @@ async function loadUsers() {
   if (!usersList) return;
   try {
     // prefer relative path so the UI works when served under a subpath (e.g. /botusbcali/)
-    let res = await fetch('api/users');
+    let res = await fetch(withBase('api/users'));
 
     // fallback: try mounting under the current path (handles sites served at /botusbcali/)
     if (!res.ok) {
@@ -630,7 +645,7 @@ usersList?.addEventListener('click', async (ev) => {
     const timeoutId = setTimeout(() => controller.abort(), 12000);
 
     try {
-      const res = await fetch(`api/users/${encodeURIComponent(chatId)}/message`, {
+      const res = await fetch(withBase(`api/users/${encodeURIComponent(chatId)}/message`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text }),
@@ -697,7 +712,7 @@ usersList?.addEventListener('click', async (ev) => {
     const finalizeId = setTimeout(async () => {
       clearInterval(timerId);
       try {
-        const res = await fetch(`api/users/${encodeURIComponent(chatId)}`, { method: 'DELETE' });
+        const res = await fetch(withBase(`api/users/${encodeURIComponent(chatId)}`), { method: 'DELETE' });
         if (!res.ok) throw new Error('No se pudo eliminar');
         appendLog(`Usuario ${chatId} eliminado (confirmado)`, 'success');
       } catch (e) {
@@ -931,7 +946,7 @@ documentsList.addEventListener("click", async (event) => {
   const stopSimulated = startSimulatedProgress((p) => progress.set(p));
 
   try {
-    const response = await fetch(`api/documents/${docId}`, {
+    const response = await fetch(withBase(`api/documents/${docId}`), {
       method: "DELETE",
     });
     if (!response.ok) {
@@ -953,7 +968,7 @@ documentsList.addEventListener("click", async (event) => {
 
 async function loadConfig() {
   try {
-    const response = await fetch("api/config");
+    const response = await fetch(withBase("api/config"));
     const data = await response.json();
     activePromptInput.value = data.context.activePrompt || "";
     additionalNotesInput.value = data.context.additionalNotes || "";
@@ -979,7 +994,7 @@ function renderContextPreview(context = {}) {
 
 async function refreshDocuments() {
   try {
-    const response = await fetch("api/documents");
+    const response = await fetch(withBase("api/documents"));
     const documents = await response.json();
     renderDocuments(documents);
   } catch (error) {
@@ -1048,7 +1063,7 @@ broadcastForm?.addEventListener("submit", async (event) => {
       if (mediaFile) form.append("media", mediaFile);
 
       const result = await xhrJson({
-        url: "send-broadcast",
+        url: withBase("send-broadcast"),
         method: "POST",
         headers,
         body: form,
@@ -1087,7 +1102,7 @@ broadcastForm?.addEventListener("submit", async (event) => {
           : {}),
       };
 
-      const response = await fetch("send-broadcast", {
+      const response = await fetch(withBase("send-broadcast"), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -1133,7 +1148,7 @@ contextForm.addEventListener("submit", async (event) => {
   const stopSimulated = startSimulatedProgress((p) => progress.set(p));
 
   try {
-    const response = await fetch("api/config/context", {
+    const response = await fetch(withBase("api/config/context"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -1196,7 +1211,7 @@ docUploadForm.addEventListener("submit", async (event) => {
 
       const checkOnce = async () => {
         try {
-          const res = await fetch("api/documents");
+          const res = await fetch(withBase("api/documents"));
           if (!res.ok) return null;
           const docs = await res.json();
           const found = Array.isArray(docs)
@@ -1230,7 +1245,7 @@ docUploadForm.addEventListener("submit", async (event) => {
 
   try {
     const resultPromise = xhrJson({
-      url: "api/documents",
+      url: withBase("api/documents"),
       method: "POST",
       body: formData,
       onUploadProgress: (loaded, total) => {
@@ -1323,7 +1338,7 @@ docUrlForm.addEventListener("submit", async (event) => {
   };
 
   try {
-    const response = await fetch("api/documents/url", {
+    const response = await fetch(withBase("api/documents/url"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -1364,7 +1379,7 @@ docWebForm?.addEventListener("submit", async (event) => {
   };
 
   try {
-    const response = await fetch("api/documents/web", {
+    const response = await fetch(withBase("api/documents/web"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -1407,7 +1422,7 @@ docHtmlForm?.addEventListener("submit", async (event) => {
   };
 
   try {
-    const response = await fetch("api/documents/html", {
+    const response = await fetch(withBase("api/documents/html"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -1451,7 +1466,7 @@ docTextForm?.addEventListener("submit", async (event) => {
   };
 
   try {
-    const response = await fetch("api/documents/html", {
+    const response = await fetch(withBase("api/documents/html"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
