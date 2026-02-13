@@ -473,13 +473,27 @@ function renderUsers(users) {
 async function loadUsers() {
   if (!usersList) return;
   try {
-    const res = await fetch('/api/users');
-    if (!res.ok) throw new Error('Error cargando usuarios');
+    // prefer relative path so the UI works when served under a subpath (e.g. /botusbcali/)
+    let res = await fetch('api/users');
+
+    // fallback: try mounting under the current path (handles sites served at /botusbcali/)
+    if (!res.ok) {
+      try {
+        const base = window.location.pathname.replace(/\/$/, '');
+        res = await fetch(`${base}/api/users`);
+      } catch (e) {
+        // ignore fallback error, will be handled below
+      }
+    }
+
+    if (!res.ok) throw new Error('Error cargando usuarios (status ' + (res.status || '??') + ')');
+
     const data = await res.json();
     usersCache = Array.isArray(data) ? data : [];
     renderUsers(usersCache);
     renderBroadcastUsers(usersCache);
   } catch (err) {
+    console.error('Failed to load users:', err);
     usersList.innerHTML = '<p class="empty-state">Error al cargar usuarios.</p>';
     usersCache = [];
     renderBroadcastUsers([]);
