@@ -244,7 +244,6 @@ const RECENT_MS = 24 * 60 * 60 * 1000; // 24 horas
 
 // UI state preserved across automatic refreshes
 const broadcastSelectedIds = new Set();
-const composerDrafts = new Map();
 
 
 function userMatchesFilter(u, filter) {
@@ -297,23 +296,17 @@ function renderUsers(users) {
         <div class="user-meta">
           <div class="user-name">${escapeHtml(name)}</div>
           <div class="user-identity meta-line">${identity} • ${escapeHtml(last)}</div>
-          <div class="user-composer" data-chat-id="${escapeHtml(String(u.chatId))}">
-            <input class="user-msg-input" placeholder="Escribir mensaje..." />
-            <button class="user-send" type="button" data-chat-id="${escapeHtml(String(u.chatId))}">Enviar</button>
-          </div>
+
         </div>
         <div class="user-actions">
+          <button class="user-reply" type="button" data-chat-id="${escapeHtml(String(u.chatId))}">Responder</button>
           <button class="user-delete" type="button" data-chat-id="${escapeHtml(String(u.chatId))}">Eliminar</button>
         </div>
       </div>
     `;
   }).join('');
 
-  // restore composer drafts saved while user typed
-  composerDrafts.forEach((value, key) => {
-    const input = usersList.querySelector(`.user-composer[data-chat-id="${key}"] .user-msg-input`);
-    if (input) input.value = value;
-  });
+
 }
 
 async function loadUsers() {
@@ -422,35 +415,22 @@ broadcastSelectAll?.addEventListener('change', (ev) => {
   updateBroadcastChatIdsFromCheckboxes();
 });
 
-// save drafts while typing so auto-refresh doesn't clear them
-usersList?.addEventListener('input', (ev) => {
-  const input = ev.target.closest('.user-msg-input');
-  if (!input) return;
-  const chatId = input.closest('.user-composer')?.getAttribute('data-chat-id');
-  if (!chatId) return;
-  composerDrafts.set(chatId, input.value);
-});
+
 
 usersList?.addEventListener('click', async (ev) => {
-  const sendBtn = ev.target.closest('.user-send');
+  const replyBtn = ev.target.closest('.user-reply');
   const deleteBtn = ev.target.closest('.user-delete');
   const undoBtn = ev.target.closest('.undo-restore');
 
-  // capture typed drafts in inputs (delegated 'input' handler below handles typing)
+  // 'Responder' button — prompt + send (keeps improved timeout/UX)
+  if (replyBtn) {
+    const chatId = replyBtn.getAttribute('data-chat-id');
+    const text = prompt('Mensaje a enviar al usuario:');
+    if (!text || !text.trim()) return;
 
+    const originalText = replyBtn.textContent;
+    replyBtn.disabled = true;
 
-  if (sendBtn) {
-    const chatId = sendBtn.getAttribute('data-chat-id');
-    const wrap = sendBtn.closest('.user-composer');
-    const input = wrap?.querySelector('.user-msg-input');
-    const text = input?.value?.trim();
-    if (!text) return;
-
-    // disable while request is in-flight to avoid duplicates
-    const originalText = sendBtn.textContent;
-    sendBtn.disabled = true;
-
-    // timeout guard (12s)
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 12000);
 
@@ -465,14 +445,10 @@ usersList?.addEventListener('click', async (ev) => {
       clearTimeout(timeoutId);
       const json = await res.json().catch(() => null);
       if (!res.ok) throw new Error(json?.error || `HTTP ${res.status}`);
-
-        // success UX: clear input, clear saved draft, brief success label, refresh users
-      input.value = '';
-      composerDrafts.delete(chatId);
-      sendBtn.textContent = 'Enviado';
       appendLog(`Mensaje enviado a ${chatId}`, 'success');
+      replyBtn.textContent = 'Enviado';
       await loadUsers();
-      setTimeout(() => (sendBtn.textContent = originalText), 1400);
+      setTimeout(() => (replyBtn.textContent = originalText), 1400);
     } catch (e) {
       if (e.name === 'AbortError') {
         appendLog(`Envio interrumpido (timeout) a ${chatId}`, 'error');
@@ -481,10 +457,13 @@ usersList?.addEventListener('click', async (ev) => {
       }
     } finally {
       clearTimeout(timeoutId);
-      sendBtn.disabled = false;
+      replyBtn.disabled = false;
     }
     return;
   }
+
+
+
 
 
 

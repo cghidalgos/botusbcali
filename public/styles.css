@@ -561,7 +561,8 @@ button:disabled {
 .user-meta .meta-line { font-size: 0.75rem; color: rgba(255,255,255,0.55); }
 
 .user-actions { display:flex; gap:0.5rem; align-items:center; justify-self:end; }
-.user-send { background: transparent; border-radius: 999px; padding: 0.45rem 0.7rem; font-size: 0.82rem; border: 1px solid rgba(255,255,255,0.06); color: var(--text); cursor: pointer; }
+.user-reply, .user-send { background: transparent; border-radius: 999px; padding: 0.45rem 0.7rem; font-size: 0.82rem; border: 1px solid rgba(255,255,255,0.06); color: var(--text); cursor: pointer; }
+.user-reply { color: #4fe8a2; border-color: rgba(79,232,162,0.12); }
 .user-send { border-color: rgba(79,232,162,0.12); color: #4fe8a2; }
 .user-delete { border: 1px solid rgba(239,68,68,0.18); color: #ff9aa2; background: transparent; padding: 0.38rem 0.66rem; border-radius: 0.75rem; }
 
