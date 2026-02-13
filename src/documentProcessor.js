@@ -8,11 +8,16 @@ import mammoth from "mammoth";
 import WordExtractor from "word-extractor";
 import ExcelJS from "exceljs";
 import { load } from "cheerio";
-import { chunkText, embedChunks } from "./embeddings.js";
+import { chunkText, embedChunks, embedChunkDescriptors } from "./embeddings.js";
+import { chunkByStructure, extractHtmlSectionsFromHtml } from "./structuredChunking.js";
 
 const PREVIEW_BYTES = 8192;
 const PDF_MIME_TYPES = new Set(["application/pdf"]);
-const MAX_EXTRACTED_TEXT = Infinity;
+const MAX_EXTRACTED_TEXT = (() => {
+  const raw = process.env.DOCUMENT_MAX_EXTRACTED_CHARS;
+  const parsed = Number.parseInt(raw || "2000000", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : Infinity;
+})();
 const DOCX_MIME_TYPES = new Set([
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 ]);
@@ -20,7 +25,8 @@ const DOC_MIME_TYPES = new Set(["application/msword"]);
 const XLSX_MIME_TYPES = new Set([
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 ]);
-const CSV_MIME_TYPES = new Set(["text/csv", "application/csv", "text/plain"]);
+const CSV_MIME_TYPES = new Set(["text/csv", "application/csv"]);
+const TEXT_MIME_TYPES = new Set(["text/plain"]);
 const HTML_MIME_TYPES = new Set(["text/html", "application/xhtml+xml"]);
 
 function normalizeText(text) {
@@ -87,6 +93,12 @@ function isCsvDocument(document) {
   const mimetype = String(document.mimetype ?? "").toLowerCase();
   const ext = getExtension(document);
   return CSV_MIME_TYPES.has(mimetype) || ext === ".csv";
+}
+
+function isPlainTextDocument(document) {
+  const mimetype = String(document.mimetype ?? "").toLowerCase();
+  const ext = getExtension(document);
+  return TEXT_MIME_TYPES.has(mimetype) || ext === ".txt";
 }
 
 function isHtmlDocument(document) {
@@ -157,6 +169,14 @@ async function extractHtmlText(filePath) {
     linksBlock,
   ].filter(Boolean);
   return pieces.join("\n\n");
+}
+
+async function extractPlainText(filePath) {
+  try {
+    return await fs.readFile(filePath, "utf8");
+  } catch (error) {
+    return await readPreview(filePath);
+  }
 }
 
 async function runCommand(command, args, options = {}) {
@@ -287,6 +307,9 @@ export async function processDocument(document) {
     } else if (isDocDocument(document)) {
       updateDocument(document.id, { status: "extracting" });
       sourceText = await extractDocText(document.path);
+    } else if (isPlainTextDocument(document)) {
+      updateDocument(document.id, { status: "extracting" });
+      sourceText = await extractPlainText(document.path);
     } else if (isXlsxDocument(document) || isCsvDocument(document)) {
       updateDocument(document.id, { status: "extracting" });
       sourceText = await extractSpreadsheetText(document.path, document);
@@ -315,7 +338,35 @@ export async function processDocument(document) {
     let chunks = [];
     if (limitedText) {
       try {
-        chunks = await embedChunks(chunkText(limitedText));
+        let descriptors = null;
+        if (isHtmlDocument(document) && document.path) {
+          try {
+            const rawHtml = await fs.readFile(document.path, "utf8");
+            const sections = extractHtmlSectionsFromHtml(rawHtml, null);
+            descriptors = chunkByStructure({
+              extractedText: limitedText,
+              mimetype: document.mimetype,
+              originalName: document.originalName,
+              sourceUrl: document.sourceUrl,
+              htmlSections: sections,
+            });
+          } catch (sectionError) {
+            descriptors = null;
+          }
+        } else {
+          descriptors = chunkByStructure({
+            extractedText: limitedText,
+            mimetype: document.mimetype,
+            originalName: document.originalName,
+            sourceUrl: document.sourceUrl,
+          });
+        }
+
+        if (Array.isArray(descriptors) && descriptors.length) {
+          chunks = await embedChunkDescriptors(descriptors);
+        } else {
+          chunks = await embedChunks(chunkText(limitedText));
+        }
       } catch (embedError) {
         console.error(`Embeddings fallidos para ${document.id}:`, embedError);
       }

@@ -58,6 +58,51 @@ function normalizeForSearch(value) {
     .trim();
 }
 
+function extractTeacherDirectoryFromText(text) {
+  if (!text) return [];
+  const emailRegex = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
+  const seenEmails = new Set();
+  const results = [];
+
+  const lines = String(text)
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  for (const line of lines) {
+    if (line.includes("http")) continue;
+    const matches = Array.from(line.matchAll(emailRegex));
+    if (!matches.length) continue;
+
+    let lastEnd = 0;
+    for (const match of matches) {
+      const email = match?.[0];
+      if (!email || seenEmails.has(email)) {
+        lastEnd = (match.index ?? lastEnd) + (email?.length || 0);
+        continue;
+      }
+
+      const index = typeof match.index === "number" ? match.index : -1;
+      if (index < 0) continue;
+
+      const segment = line
+        .slice(lastEnd, index)
+        .replace(/\s+/g, " ")
+        .trim();
+
+      lastEnd = index + email.length;
+
+      if (!segment || segment.length < 6) continue;
+      if (/^enlace\s*:?$/i.test(segment)) continue;
+
+      seenEmails.add(email);
+      results.push({ nameAndRole: segment, email });
+    }
+  }
+
+  return results;
+}
+
 function extractCourseFromLine(line) {
   if (!line) return "";
   const fields = String(line)
@@ -83,6 +128,108 @@ function extractCourseFromLine(line) {
   if (withSpaces) return withSpaces;
   const firstCandidate = fields.find(isLikelyCourse);
   return firstCandidate || "";
+}
+
+function formatProfessorName(raw) {
+  const cleaned = String(raw || "").replace(/\s+/g, " ").trim();
+  if (!cleaned) return "";
+  if (cleaned.includes(",")) {
+    const [last, first] = cleaned.split(",").map((part) => part.trim());
+    if (last && first) {
+      return `${toTitleCase(first)} ${toTitleCase(last)}`.trim();
+    }
+  }
+  return toTitleCase(cleaned);
+}
+
+function toTitleCase(value) {
+  return String(value || "")
+    .toLowerCase()
+    .split(" ")
+    .map((word) => (word ? word.charAt(0).toUpperCase() + word.slice(1) : ""))
+    .join(" ")
+    .trim();
+}
+
+function extractScheduleEntries(lines, nameTokens = []) {
+  const entries = [];
+  const normalizedTokens = nameTokens.filter(Boolean);
+  const scheduleRegex = /(?:\d{3,4}\s+\S+\s+)(?<course>[A-ZÁÉÍÓÚÜÑ0-9\s.()\-]+?)\s+(?<start>\d{1,2}[.:]\d{2})\s+(?<end>\d{1,2}[.:]\d{2})\s+(?<day>Lunes|Martes|Miercoles|Miércoles|Jueves|Viernes|Sabado|Sábado|Domingo)\s+X\s+(?<room>CA-[A-Z]\d{3,4}|ESPACIO ESPECIAL)\s+(?:[A-ZÁÉÍÓÚÜÑ0-9.-]+\s+){0,4}(?<prof>[A-ZÁÉÍÓÚÜÑ ,]+?)\s+(?<email>[\w._%+-]+@[\w.-]+\.[A-Z]{2,})/giu;
+
+  const matchesName = (value) => {
+    if (!normalizedTokens.length) return true;
+    const haystack = normalizeForSearch(value);
+    return normalizedTokens.every((token) => haystack.includes(token));
+  };
+
+  for (const line of lines) {
+    const text = String(line || "");
+    let match;
+    while ((match = scheduleRegex.exec(text))) {
+      const course = String(match.groups?.course || "").replace(/\s+/g, " ").trim();
+      const prof = String(match.groups?.prof || "").replace(/\s+/g, " ").trim();
+      if (!course || !matchesName(prof)) continue;
+      entries.push({
+        course,
+        day: match.groups?.day || "",
+        start: match.groups?.start || "",
+        end: match.groups?.end || "",
+        room: match.groups?.room || "",
+        professor: prof,
+        email: String(match.groups?.email || "").trim(),
+      });
+    }
+  }
+
+  return entries;
+}
+
+function extractScheduleEntriesFromText(text, nameTokens = []) {
+  const entries = [];
+  const normalizedTokens = nameTokens.filter(Boolean);
+  if (!text) return entries;
+
+  const scheduleRegex = /(?:\d{3,4}\s+\S+\s+)(?<course>[A-ZÁÉÍÓÚÜÑ0-9\s.()\-]+?)\s+(?<start>\d{1,2}[.:]\d{2})\s+(?<end>\d{1,2}[.:]\d{2})\s+(?<day>Lunes|Martes|Miercoles|Miércoles|Jueves|Viernes|Sabado|Sábado|Domingo)\s+X\s+(?<room>CA-[A-Z]\d{3,4}|ESPACIO ESPECIAL)\s+(?:[A-ZÁÉÍÓÚÜÑ0-9.-]+\s+){0,4}(?<prof>[A-ZÁÉÍÓÚÜÑ ,]+?)\s+(?<email>[\w._%+-]+@[\w.-]+\.[A-Z]{2,})/giu;
+
+  const matchesName = (value) => {
+    if (!normalizedTokens.length) return true;
+    const haystack = normalizeForSearch(value);
+    return normalizedTokens.every((token) => haystack.includes(token));
+  };
+
+  let match;
+  const raw = String(text);
+  while ((match = scheduleRegex.exec(raw))) {
+    const course = String(match.groups?.course || "").replace(/\s+/g, " ").trim();
+    const prof = String(match.groups?.prof || "").replace(/\s+/g, " ").trim();
+    if (!course || !matchesName(prof)) continue;
+    entries.push({
+      course,
+      day: match.groups?.day || "",
+      start: match.groups?.start || "",
+      end: match.groups?.end || "",
+      room: match.groups?.room || "",
+      professor: prof,
+      email: String(match.groups?.email || "").trim(),
+    });
+  }
+
+  return entries;
+}
+
+function resolveProfessorLabelByEmail(email, documents) {
+  if (!email) return "";
+  const normalizedEmail = String(email).toLowerCase();
+  for (const doc of documents) {
+    const extracted = String(doc?.extractedText || "");
+    if (!extracted) continue;
+    const entries = extractTeacherDirectoryFromText(extracted);
+    const match = entries.find((entry) => String(entry?.email || "").toLowerCase() === normalizedEmail);
+    if (match?.nameAndRole) {
+      return match.nameAndRole.trim();
+    }
+  }
+  return "";
 }
 
 function parseSpreadsheetRows(text) {
@@ -210,6 +357,9 @@ export async function composeResponse({ incomingText, context, documents, chatId
   const { activePrompt, additionalNotes, promptTemplate } = context ?? {};
   const rawQuestion = String(incomingText || "");
   const normalizedQuestion = normalizeForSearch(rawQuestion);
+  if (/(\bgracias\b|\bperfecto\b|\blo hiciste bien\b|\bexcelente\b|\bmuy bien\b)/i.test(rawQuestion)) {
+    return "Con todo el gusto.";
+  }
   const memory = chatId ? getMemory(chatId) : "";
   const stopTokens = new Set([
     "quien",
@@ -232,6 +382,10 @@ export async function composeResponse({ incomingText, context, documents, chatId
     "sobre",
     "cual",
     "cuál",
+    "cuales",
+    "cuáles",
+    "quien",
+    "quién",
   ]);
   const normalizedTokens = normalizeForSearch(incomingText)
     .split(" ")
@@ -260,6 +414,8 @@ export async function composeResponse({ incomingText, context, documents, chatId
       (/\b(clase|clases)\b/.test(normalizedQuestion) &&
         /\b(queda|asigna|asignada|asignado)\b/.test(normalizedQuestion)));
 
+  let teachingNameTokens = [];
+
   const isCourseInfoQuery =
     (/\b(lugar|aula|salon|salón|horario|hora|dia|dias|donde|dónde)\b/.test(
       normalizedQuestion
@@ -286,6 +442,8 @@ export async function composeResponse({ incomingText, context, documents, chatId
       "asignada",
       "asignado",
       "profesor",
+      "profe",
+      "profes",
       "docente",
       "docentes",
       "de",
@@ -295,6 +453,7 @@ export async function composeResponse({ incomingText, context, documents, chatId
     if (nameTerms.length >= 2) {
       targetTerms = nameTerms.slice(0, 4);
     }
+    teachingNameTokens = nameTerms.filter((term) => term !== "profe");
   }
 
   if (isCourseInfoQuery) {
@@ -556,9 +715,83 @@ export async function composeResponse({ incomingText, context, documents, chatId
     }
   }
 
-  const finalSnippets = semanticSnippets.length ? semanticSnippets : relevantSnippets;
+  const finalSnippets = (semanticSnippets.length ? semanticSnippets : relevantSnippets).slice(0, 4);
 
   if (isTeachingQuery && targetTerms.length) {
+    const scheduleEntries = [];
+    for (const doc of sortedDocuments) {
+      const text = String(doc.extractedText || "");
+      if (!text) continue;
+      const isScheduleDoc =
+        String(doc.mimetype || "").includes("spreadsheet") ||
+        String(doc.originalName || "").toLowerCase().endsWith(".xlsx");
+
+      if (!isScheduleDoc && !/programacion|sistemas de control|algoritmos|software/i.test(text)) {
+        continue;
+      }
+
+      const found = extractScheduleEntriesFromText(text, teachingNameTokens);
+      if (found.length) {
+        scheduleEntries.push(...found);
+        break;
+      }
+
+      const chunks = Array.isArray(doc.chunks) ? doc.chunks : [];
+      for (const chunk of chunks) {
+        const chunkText = typeof chunk?.text === "string" ? chunk.text : "";
+        if (!chunkText) continue;
+        const foundInChunk = extractScheduleEntriesFromText(chunkText, teachingNameTokens);
+        if (foundInChunk.length) {
+          scheduleEntries.push(...foundInChunk);
+          break;
+        }
+      }
+
+      if (scheduleEntries.length) {
+        break;
+      }
+    }
+
+    if (scheduleEntries.length) {
+      const grouped = new Map();
+      scheduleEntries.forEach((entry) => {
+        const key = entry.course;
+        if (!grouped.has(key)) grouped.set(key, []);
+        grouped.get(key).push(entry);
+      });
+
+      const professorEmail = scheduleEntries[0]?.email || "";
+      const resolvedLabel = resolveProfessorLabelByEmail(professorEmail, sortedDocuments);
+      const professorLabel = resolvedLabel || formatProfessorName(scheduleEntries[0]?.professor || "") || targetTerms.join(" ");
+      const lines = [`${professorLabel}, imparte las siguientes materias:`];
+      if (professorEmail) {
+        lines.push(`Correo: ${professorEmail}`);
+      } else {
+        lines.push(
+          "Si necesitas más detalles, puedes contactar a la dirección del programa o a la coordinación académica."
+        );
+      }
+
+      for (const [course, sessions] of grouped.entries()) {
+        lines.push(`\n- ${toTitleCase(course)}`);
+        const seenSessions = new Set();
+        sessions.forEach((session) => {
+          const day = session.day ? toTitleCase(session.day) : "";
+          const time = session.start && session.end ? `${session.start} a ${session.end}` : "";
+          const room = session.room ? ` en ${session.room}` : "";
+          const detail = [day, time].filter(Boolean).join(" de ");
+          const key = [detail, room].filter(Boolean).join("|");
+          if (seenSessions.has(key)) return;
+          seenSessions.add(key);
+          if (detail || room) {
+            lines.push(`  - ${[detail, room].filter(Boolean).join("")}`.trimEnd());
+          }
+        });
+      }
+
+      return lines.join("\n");
+    }
+
     const matchedLines = [];
     for (const doc of sortedDocuments) {
       const text = String(doc.extractedText || "");
@@ -572,6 +805,47 @@ export async function composeResponse({ incomingText, context, documents, chatId
         }
       }
       if (matchedLines.length >= 100) break;
+    }
+
+    const scheduleEntriesFromLines = extractScheduleEntries(matchedLines, teachingNameTokens);
+    if (scheduleEntriesFromLines.length) {
+      const grouped = new Map();
+      scheduleEntriesFromLines.forEach((entry) => {
+        const key = entry.course;
+        if (!grouped.has(key)) grouped.set(key, []);
+        grouped.get(key).push(entry);
+      });
+
+      const professorEmail = scheduleEntriesFromLines[0]?.email || "";
+      const resolvedLabel = resolveProfessorLabelByEmail(professorEmail, sortedDocuments);
+      const professorLabel = resolvedLabel || formatProfessorName(scheduleEntriesFromLines[0]?.professor || "") || targetTerms.join(" ");
+      const lines = [`${professorLabel}, imparte las siguientes materias:`];
+      if (professorEmail) {
+        lines.push(`Correo: ${professorEmail}`);
+      } else {
+        lines.push(
+          "Si necesitas más detalles, puedes contactar a la dirección del programa o a la coordinación académica."
+        );
+      }
+
+      for (const [course, sessions] of grouped.entries()) {
+        lines.push(`\n- ${toTitleCase(course)}`);
+        const seenSessions = new Set();
+        sessions.forEach((session) => {
+          const day = session.day ? toTitleCase(session.day) : "";
+          const time = session.start && session.end ? `${session.start} a ${session.end}` : "";
+          const room = session.room ? ` en ${session.room}` : "";
+          const detail = [day, time].filter(Boolean).join(" de ");
+          const key = [detail, room].filter(Boolean).join("|");
+          if (seenSessions.has(key)) return;
+          seenSessions.add(key);
+          if (detail || room) {
+            lines.push(`  - ${[detail, room].filter(Boolean).join("")}`.trimEnd());
+          }
+        });
+      }
+
+      return lines.join("\n");
     }
 
     const courses = new Set();
@@ -654,7 +928,9 @@ export async function composeResponse({ incomingText, context, documents, chatId
     ? `DOCUMENTO COMPLETO PARA RESPONDER:\n${fullDocSource ? fullDocSource + "\n" : ""}${fullDocText}\n\nInstrucción: devuelve el documento completo sin omitir información.`
     : "";
 
-  const memoryBlock = memory ? `Memoria de conversación:\n${memory}` : "";
+  const memoryBlock = memory
+    ? `Memoria de conversación:\n${memory.slice(-1000)}`
+    : "";
 
   const defaultPrompt = [
     "Actúa como un asistente experto en las instrucciones provistas.",
@@ -711,6 +987,7 @@ export async function composeResponse({ incomingText, context, documents, chatId
   }
 
   const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
+  const maxTokens = Number.parseInt(process.env.OPENAI_MAX_TOKENS || "500", 10);
   const response = await client.chat.completions.create({
     model,
     messages: [
@@ -722,6 +999,7 @@ export async function composeResponse({ incomingText, context, documents, chatId
       { role: "user", content: assembledPrompt },
     ],
     temperature: 0.2,
+    max_tokens: Number.isFinite(maxTokens) && maxTokens > 0 ? maxTokens : 500,
   });
 
   const answer = response.choices?.[0]?.message?.content?.trim() ?? "No se obtuvo respuesta.";

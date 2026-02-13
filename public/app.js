@@ -17,7 +17,6 @@ const additionalNotesInput = document.getElementById("additionalNotes");
 const contextPreview = document.getElementById("context-preview");
 const previewPrompt = document.getElementById("preview-prompt");
 const previewNotes = document.getElementById("preview-notes");
-const previewTemplate = document.getElementById("preview-template");
 const editContextBtn = document.getElementById("edit-context-btn");
 const docUrlForm = document.getElementById("doc-url-form");
 const docUrlInput = document.getElementById("docUrl");
@@ -39,13 +38,135 @@ const textSummaryInput = document.getElementById("textSummary");
 const textContentInput = document.getElementById("textContent");
 const qaHistoryContainer = document.getElementById("qa-history");
 const clearHistoryBtn = document.getElementById("clear-history-btn");
+
+let documentUploadMaxMB = 60;
+
+function clampPercent(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 0;
+  return Math.max(0, Math.min(100, Math.round(parsed)));
+}
+
+function createProgressButton(button, workingText, fallbackText) {
+  const originalText = button ? button.textContent : "";
+  return {
+    start() {
+      if (!button) return;
+      button.disabled = true;
+      this.set(0);
+    },
+    set(percent) {
+      if (!button) return;
+      button.textContent = `${workingText} ${clampPercent(percent)}%`;
+    },
+    finish() {
+      if (!button) return;
+      button.disabled = false;
+      button.textContent = originalText || fallbackText || "";
+    },
+  };
+}
+
+function startSimulatedProgress(setPercent) {
+  let percent = 0;
+  const safeSet = (value) => {
+    try {
+      setPercent(clampPercent(value));
+    } catch {
+      // ignore
+    }
+  };
+
+  safeSet(0);
+  const timer = setInterval(() => {
+    if (percent < 85) {
+      percent += 3 + Math.floor(Math.random() * 4);
+    } else {
+      percent += 1;
+    }
+    percent = Math.min(95, percent);
+    safeSet(percent);
+  }, 250);
+
+  return () => {
+    clearInterval(timer);
+    safeSet(100);
+  };
+}
+
+function xhrJson({ url, method = "POST", headers = {}, body, onUploadProgress }) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open(method, url, true);
+    xhr.responseType = "json";
+
+    Object.entries(headers || {}).forEach(([key, value]) => {
+      if (value === undefined || value === null || value === "") return;
+      xhr.setRequestHeader(key, String(value));
+    });
+
+    if (typeof onUploadProgress === "function" && xhr.upload) {
+      xhr.upload.onprogress = (event) => {
+        if (!event.lengthComputable || !event.total) return;
+        onUploadProgress(event.loaded, event.total);
+      };
+    }
+
+    xhr.onload = () => {
+      const status = xhr.status;
+      const ok = status >= 200 && status < 300;
+
+      let data = xhr.response;
+      if (data == null && xhr.responseText) {
+        try {
+          data = JSON.parse(xhr.responseText);
+        } catch {
+          data = null;
+        }
+      }
+
+      resolve({ ok, status, data });
+    };
+
+    xhr.onerror = () => reject(new Error("Error de red"));
+    xhr.send(body);
+  });
+}
+
+const broadcastForm = document.getElementById("broadcast-form");
+const broadcastMessageInput = document.getElementById("broadcastMessage");
+const broadcastSendToAllInput = document.getElementById("broadcastSendToAll");
+const broadcastChatIdsInput = document.getElementById("broadcastChatIds");
+const broadcastSecretInput = document.getElementById("broadcastSecret");
+const broadcastSendBtn = document.getElementById("broadcastSendBtn");
+const broadcastResultWrapper = document.getElementById("broadcast-result-wrapper");
+const broadcastResultPre = document.getElementById("broadcast-result");
+
+const broadcastMediaTypeInput = document.getElementById("broadcastMediaType");
+const broadcastMediaSourceInput = document.getElementById("broadcastMediaSource");
+const broadcastMediaRefWrap = document.getElementById("broadcastMediaRefWrap");
+const broadcastMediaRefInput = document.getElementById("broadcastMediaRef");
+const broadcastMediaFileWrap = document.getElementById("broadcastMediaFileWrap");
+const broadcastMediaFileInput = document.getElementById("broadcastMediaFile");
+const broadcastMediaCaptionInput = document.getElementById("broadcastMediaCaption");
+
 function renderHistory(history) {
   if (!qaHistoryContainer) return;
-  if (!history.length) {
-    qaHistoryContainer.innerHTML = '<p>No hay historial aún.</p>';
+
+  const sorted = Array.isArray(history)
+    ? [...history].sort((a, b) => {
+        const at = Date.parse(a?.timestamp ?? 0) || 0;
+        const bt = Date.parse(b?.timestamp ?? 0) || 0;
+        return bt - at;
+      })
+    : [];
+
+  if (!sorted.length) {
+    qaHistoryContainer.innerHTML =
+      '<p class="empty-state">No hay historial aún. Cuando el bot responda preguntas, aparecerán aquí.</p>';
     return;
   }
-  qaHistoryContainer.innerHTML = history
+  qaHistoryContainer.innerHTML = sorted
     .map(
       (item) => `
         <div class="qa-entry">
@@ -60,7 +181,7 @@ function renderHistory(history) {
 
 async function loadHistory() {
   try {
-    const res = await fetch("/api/history");
+    const res = await fetch("api/history");
     const data = await res.json();
     renderHistory(data);
   } catch (e) {
@@ -71,19 +192,364 @@ async function loadHistory() {
 if (clearHistoryBtn) {
   clearHistoryBtn.addEventListener("click", async () => {
     if (!confirm("¿Seguro que deseas borrar todo el historial?")) return;
+    const progress = createProgressButton(clearHistoryBtn, "Borrando…", "Borrar historial");
+    progress.start();
+    const stopSimulated = startSimulatedProgress((p) => progress.set(p));
     try {
-      await fetch("/api/history/clear", { method: "POST" });
-      loadHistory();
+      await fetch("api/history/clear", { method: "POST" });
+      await loadHistory();
+      stopSimulated();
+      progress.set(100);
       appendLog("Historial borrado", "success");
     } catch (e) {
       appendLog("Error al borrar historial", "error");
+    } finally {
+      stopSimulated();
+      progress.finish();
     }
   });
 }
 
 window.addEventListener("DOMContentLoaded", () => {
   loadHistory();
+  loadUsers();
+  initUsersFilterBar();
   setInterval(loadHistory, DOCUMENT_POLL_INTERVAL);
+  setInterval(loadUsers, DOCUMENT_POLL_INTERVAL);
+});
+
+function initUsersFilterBar() {
+  const buttons = Array.from(document.querySelectorAll('.filter-btn'));
+  buttons.forEach((btn) => {
+    btn.addEventListener('click', (ev) => {
+      buttons.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      usersFilter = btn.getAttribute('data-filter') || 'all';
+      renderUsers(usersCache || []);
+      renderBroadcastUsers(usersCache || []);
+    });
+  });
+  // set default active
+  const defaultBtn = document.querySelector('.filter-btn[data-filter="all"]');
+  if (defaultBtn) defaultBtn.classList.add('active');
+}
+
+/* ------------------ Users UI ------------------ */
+const usersList = document.getElementById("users-list");
+const usersCountEl = document.getElementById('users-count');
+const pendingDeletes = new Map(); // chatId -> { timerId, expiresAt }
+let usersCache = [];
+let usersFilter = 'all';
+const RECENT_MS = 24 * 60 * 60 * 1000; // 24 horas
+
+// UI state preserved across automatic refreshes
+const broadcastSelectedIds = new Set();
+const composerDrafts = new Map();
+
+
+function userMatchesFilter(u, filter) {
+  if (!u) return false;
+  if (!filter || filter === 'all') return true;
+  if (filter === 'recent') {
+    const t = Date.parse(u.lastInteractionAt || 0) || 0;
+    return Date.now() - t <= RECENT_MS;
+  }
+  if (filter === 'blocked') return Boolean(u.isBlocked);
+  if (filter === 'hasUsername') return Boolean(u.username);
+  return true;
+}
+
+function renderUsers(users) {
+  if (!usersList) return;
+  const sorted = Array.isArray(users) ? [...users].sort((a,b)=>{
+    const at = Date.parse(a?.lastInteractionAt||0)||0;
+    const bt = Date.parse(b?.lastInteractionAt||0)||0;
+    return bt - at;
+  }) : [];
+
+  const filtered = sorted.filter(u => userMatchesFilter(u, usersFilter));
+  if (usersCountEl) usersCountEl.textContent = String(filtered.length);
+
+  if (!filtered.length) {
+    usersList.innerHTML = '<p class="empty-state">No hay usuarios que coincidan con el filtro.</p>';
+    return;
+  }
+
+  usersList.innerHTML = filtered.map(u => {
+    const name = [u.firstName, u.lastName].filter(Boolean).join(' ') || '(sin nombre)';
+    const identity = u.username ? `@${escapeHtml(u.username)}` : `chat_id: ${escapeHtml(String(u.chatId))}`;
+    const last = u.lastInteractionAt ? new Date(u.lastInteractionAt).toLocaleString() : '';
+    const isBlocked = Boolean(u.isBlocked);
+
+    const avatarSvg = `
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <path d="M12 12c2.761 0 5-2.239 5-5s-2.239-5-5-5-5 2.239-5 5 2.239 5 5 5z" fill="currentColor" opacity="0.12"/>
+        <path d="M12 13c-4.418 0-8 2.239-8 5v1h16v-1c0-2.761-3.582-5-8-5z" fill="currentColor" opacity="0.08"/>
+        <path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zm0 2c4.418 0 8 2.239 8 5v1H4v-1c0-2.761 3.582-5 8-5z" stroke="currentColor" stroke-opacity="0.6" stroke-width="0.6"/>
+      </svg>
+    `;
+
+    const badgeHtml = isBlocked ? `<span class="avatar-badge" title="Bloqueado">!</span>` : "";
+
+    return `
+      <div class="user-card ${isBlocked ? 'disabled-muted' : ''}" data-chat-id="${escapeHtml(String(u.chatId))}">
+        <div class="user-avatar">${avatarSvg}${badgeHtml}</div>
+        <div class="user-meta">
+          <div class="user-name">${escapeHtml(name)}</div>
+          <div class="user-identity meta-line">${identity} • ${escapeHtml(last)}</div>
+          <div class="user-composer" data-chat-id="${escapeHtml(String(u.chatId))}">
+            <input class="user-msg-input" placeholder="Escribir mensaje..." />
+            <button class="user-send" type="button" data-chat-id="${escapeHtml(String(u.chatId))}">Enviar</button>
+          </div>
+        </div>
+        <div class="user-actions">
+          <button class="user-delete" type="button" data-chat-id="${escapeHtml(String(u.chatId))}">Eliminar</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  // restore composer drafts saved while user typed
+  composerDrafts.forEach((value, key) => {
+    const input = usersList.querySelector(`.user-composer[data-chat-id="${key}"] .user-msg-input`);
+    if (input) input.value = value;
+  });
+}
+
+async function loadUsers() {
+  if (!usersList) return;
+  try {
+    const res = await fetch('/api/users');
+    if (!res.ok) throw new Error('Error cargando usuarios');
+    const data = await res.json();
+    usersCache = Array.isArray(data) ? data : [];
+    renderUsers(usersCache);
+    renderBroadcastUsers(usersCache);
+  } catch (err) {
+    usersList.innerHTML = '<p class="empty-state">Error al cargar usuarios.</p>';
+    usersCache = [];
+    renderBroadcastUsers([]);
+  }
+}
+
+/* Broadcast users UI (inside Mensajería masiva) */
+const broadcastUsersList = document.getElementById('broadcast-users-list');
+const broadcastSelectAll = document.getElementById('broadcastSelectAll');
+
+function renderBroadcastUsers(users) {
+  if (!broadcastUsersList) return;
+  if (!Array.isArray(users) || users.length === 0) {
+    broadcastUsersList.innerHTML = '<p class="empty-state">No hay usuarios disponibles.</p>';
+    return;
+  }
+
+  const filtered = users.filter(u => userMatchesFilter(u, usersFilter));
+
+  const html = filtered.map(u => {
+    const name = [u.firstName, u.lastName].filter(Boolean).join(' ') || '(sin nombre)';
+    const identity = u.username ? `@${escapeHtml(u.username)}` : `chat_id: ${escapeHtml(String(u.chatId))}`;
+    const isBlocked = Boolean(u.isBlocked);
+    const initials = (u.firstName || u.lastName || u.username || String(u.chatId)).slice(0,2).toUpperCase();
+    const avatarSvg = `
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <path d="M12 12c2.761 0 5-2.239 5-5s-2.239-5-5-5-5 2.239-5 5 2.239 5 5 5z" fill="currentColor" opacity="0.12"/>
+        <path d="M12 13c-4.418 0-8 2.239-8 5v1h16v-1c0-2.761-3.582-5-8-5z" fill="currentColor" opacity="0.08"/>
+      </svg>
+    `;
+    const badgeHtml = isBlocked ? `<span class="avatar-badge" title="Bloqueado">!</span>` : "";
+    return `
+      <label class="broadcast-user" title="${escapeHtml(identity)}">
+        <input type="checkbox" class="broadcast-user-checkbox" data-chat-id="${escapeHtml(String(u.chatId))}" />
+        <div class="b-avatar">${avatarSvg}${badgeHtml}</div>
+        <div>
+          <div class="b-name">${escapeHtml(name)}</div>
+          <div class="b-identity">${escapeHtml(identity)}</div>
+        </div>
+      </label>
+    `;
+  }).join('');
+
+  broadcastUsersList.innerHTML = html;
+  // restore selection from state
+  document.querySelectorAll('.broadcast-user-checkbox').forEach((cb) => {
+    const id = cb.getAttribute('data-chat-id');
+    cb.checked = broadcastSelectedIds.has(id);
+  });
+  updateBroadcastChatIdsFromCheckboxes();
+}
+
+function getSelectedBroadcastChatIds() {
+  // prefer tracked selection set; fall back to DOM
+  if (broadcastSelectedIds.size) return Array.from(broadcastSelectedIds);
+  const boxes = Array.from(document.querySelectorAll('.broadcast-user-checkbox'));
+  return boxes.filter(b => b.checked).map(b => b.getAttribute('data-chat-id'));
+}
+
+function updateBroadcastChatIdsFromCheckboxes() {
+  const ids = Array.from(document.querySelectorAll('.broadcast-user-checkbox'))
+    .filter(b => b.checked)
+    .map(b => b.getAttribute('data-chat-id'));
+
+  // keep internal selection set in sync
+  broadcastSelectedIds.clear();
+  ids.forEach((id) => broadcastSelectedIds.add(id));
+
+  if (broadcastChatIdsInput) broadcastChatIdsInput.value = ids.join('\n');
+
+  // sync select-all checkbox
+  const total = document.querySelectorAll('.broadcast-user-checkbox').length;
+  const checked = ids.length;
+  if (broadcastSelectAll) broadcastSelectAll.checked = checked > 0 && checked === total;
+}
+
+broadcastUsersList?.addEventListener('change', (ev) => {
+  const box = ev.target.closest('.broadcast-user-checkbox');
+  if (!box) return;
+  const chatId = box.getAttribute('data-chat-id');
+  if (box.checked) broadcastSelectedIds.add(chatId);
+  else broadcastSelectedIds.delete(chatId);
+  updateBroadcastChatIdsFromCheckboxes();
+});
+
+broadcastSelectAll?.addEventListener('change', (ev) => {
+  const checked = Boolean(ev.target.checked);
+  document.querySelectorAll('.broadcast-user-checkbox').forEach((b) => {
+    b.checked = checked;
+    const id = b.getAttribute('data-chat-id');
+    if (checked) broadcastSelectedIds.add(id);
+    else broadcastSelectedIds.delete(id);
+  });
+  updateBroadcastChatIdsFromCheckboxes();
+});
+
+// save drafts while typing so auto-refresh doesn't clear them
+usersList?.addEventListener('input', (ev) => {
+  const input = ev.target.closest('.user-msg-input');
+  if (!input) return;
+  const chatId = input.closest('.user-composer')?.getAttribute('data-chat-id');
+  if (!chatId) return;
+  composerDrafts.set(chatId, input.value);
+});
+
+usersList?.addEventListener('click', async (ev) => {
+  const sendBtn = ev.target.closest('.user-send');
+  const deleteBtn = ev.target.closest('.user-delete');
+  const undoBtn = ev.target.closest('.undo-restore');
+
+  // capture typed drafts in inputs (delegated 'input' handler below handles typing)
+
+
+  if (sendBtn) {
+    const chatId = sendBtn.getAttribute('data-chat-id');
+    const wrap = sendBtn.closest('.user-composer');
+    const input = wrap?.querySelector('.user-msg-input');
+    const text = input?.value?.trim();
+    if (!text) return;
+
+    // disable while request is in-flight to avoid duplicates
+    const originalText = sendBtn.textContent;
+    sendBtn.disabled = true;
+
+    // timeout guard (12s)
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 12000);
+
+    try {
+      const res = await fetch(`/api/users/${encodeURIComponent(chatId)}/message`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutId);
+      const json = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(json?.error || `HTTP ${res.status}`);
+
+        // success UX: clear input, clear saved draft, brief success label, refresh users
+      input.value = '';
+      composerDrafts.delete(chatId);
+      sendBtn.textContent = 'Enviado';
+      appendLog(`Mensaje enviado a ${chatId}`, 'success');
+      await loadUsers();
+      setTimeout(() => (sendBtn.textContent = originalText), 1400);
+    } catch (e) {
+      if (e.name === 'AbortError') {
+        appendLog(`Envio interrumpido (timeout) a ${chatId}`, 'error');
+      } else {
+        appendLog(`Error al enviar mensaje a ${chatId}: ${e.message || e}`, 'error');
+      }
+    } finally {
+      clearTimeout(timeoutId);
+      sendBtn.disabled = false;
+    }
+    return;
+  }
+
+
+
+  if (deleteBtn) {
+    const chatId = deleteBtn.getAttribute('data-chat-id');
+    if (!chatId) return;
+
+    // optimistic UI: replace card with undo notice and delay actual DELETE
+    const card = deleteBtn.closest('.user-card');
+    if (!card) return;
+    const undoSeconds = 15; // configured by user choice
+    const expiresAt = Date.now() + undoSeconds * 1000;
+
+    const undoHtml = `
+      <div class="undo-card" data-chat-id="${escapeHtml(chatId)}">
+        <div>Usuario eliminado • <span class="undo-countdown">${undoSeconds}</span>s</div>
+        <div class="user-actions">
+          <button class="undo-restore" type="button" data-chat-id="${escapeHtml(chatId)}">Deshacer</button>
+        </div>
+      </div>
+    `;
+
+    const parent = card.parentElement;
+    const placeholder = document.createElement('div');
+    placeholder.className = 'user-placeholder';
+    placeholder.innerHTML = undoHtml;
+    parent.replaceChild(placeholder, card);
+
+    const timerId = setInterval(() => {
+      const el = parent.querySelector(`.undo-card[data-chat-id="${chatId}"] .undo-countdown`);
+      if (!el) return clearInterval(timerId);
+      const remaining = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
+      el.textContent = String(remaining);
+    }, 900);
+
+    const finalizeId = setTimeout(async () => {
+      clearInterval(timerId);
+      try {
+        const res = await fetch(`/api/users/${encodeURIComponent(chatId)}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error('No se pudo eliminar');
+        appendLog(`Usuario ${chatId} eliminado (confirmado)`, 'success');
+      } catch (e) {
+        appendLog(`Error al eliminar ${chatId}`, 'error');
+      } finally {
+        pendingDeletes.delete(chatId);
+        await loadUsers();
+      }
+    }, undoSeconds * 1000);
+
+    pendingDeletes.set(chatId, { timerId: finalizeId, intervalId: timerId });
+    return;
+  }
+
+  if (undoBtn) {
+    const chatId = undoBtn.getAttribute('data-chat-id');
+    const pending = pendingDeletes.get(chatId);
+    if (pending) {
+      clearTimeout(pending.timerId);
+      clearInterval(pending.intervalId);
+      pendingDeletes.delete(chatId);
+    }
+    appendLog(`Restaurado usuario ${chatId}`, 'info');
+    await loadUsers();
+    return;
+  }
 });
 
 function escapeHtml(value = "") {
@@ -111,15 +577,64 @@ function renderExtractedText(doc, isOpen) {
 function appendLog(message, tone = "info") {
   const entry = document.createElement("div");
   entry.className = "log-entry";
-  entry.innerHTML = `<strong>[${new Date().toLocaleTimeString()}]</strong> ${message}`;
+  entry.innerHTML = `<strong>[${new Date().toLocaleTimeString()}]</strong> ${escapeHtml(
+    message
+  )}`;
   logContainer.prepend(entry);
 }
+
+function parseChatIds(raw) {
+  return String(raw || "")
+    .split(/[\s,;]+/g)
+    .map((token) => token.trim())
+    .filter(Boolean)
+    .filter((token) => /^-?\d+$/.test(token));
+}
+
+function renderBroadcastResult(result) {
+  if (!broadcastResultPre) return;
+  if (typeof result === "string") {
+    broadcastResultPre.textContent = result;
+  } else {
+    broadcastResultPre.textContent = JSON.stringify(result, null, 2);
+  }
+  if (broadcastResultWrapper) {
+    broadcastResultWrapper.open = true;
+  }
+}
+
+function updateBroadcastMediaUi() {
+  const mediaType = (broadcastMediaTypeInput?.value || "").trim();
+  const source = (broadcastMediaSourceInput?.value || "upload").trim();
+  const hasMedia = Boolean(mediaType);
+
+  if (broadcastMediaSourceInput) {
+    broadcastMediaSourceInput.disabled = !hasMedia;
+  }
+
+  const showRef = hasMedia && source === "ref";
+  const showFile = hasMedia && source === "upload";
+  if (broadcastMediaRefWrap) broadcastMediaRefWrap.style.display = showRef ? "block" : "none";
+  if (broadcastMediaFileWrap) broadcastMediaFileWrap.style.display = showFile ? "block" : "none";
+}
+
+broadcastMediaTypeInput?.addEventListener("change", updateBroadcastMediaUi);
+broadcastMediaSourceInput?.addEventListener("change", updateBroadcastMediaUi);
+updateBroadcastMediaUi();
 
 function describeStatus(status) {
   return STATUS_LABELS[status] || status || "Nuevo";
 }
 
 function renderDocuments(documents) {
+  const sorted = Array.isArray(documents)
+    ? [...documents].sort((a, b) => {
+        const at = Date.parse(a?.processedAt || a?.createdAt || 0) || 0;
+        const bt = Date.parse(b?.processedAt || b?.createdAt || 0) || 0;
+        return bt - at;
+      })
+    : [];
+
   const currentlyOpen = Array.from(
     documentsList.querySelectorAll(".document-details[open]")
   )
@@ -138,12 +653,13 @@ function renderDocuments(documents) {
 
   documentsList.innerHTML = "";
 
-  if (!documents.length) {
-    documentsList.textContent = "No hay documentos cargados.";
+  if (!sorted.length) {
+    documentsList.innerHTML =
+      '<p class="empty-state">No hay documentos cargados. Sube un archivo o pega contenido para que el bot tenga referencias.</p>';
     return;
   }
 
-  documents.forEach((doc) => {
+  sorted.forEach((doc) => {
     const summaryText =
       doc.status === "processing"
         ? "El archivo se está procesando..."
@@ -236,9 +752,12 @@ documentsList.addEventListener("click", async (event) => {
     return;
   }
 
+  const progress = createProgressButton(button, "Eliminando…", "Eliminar");
+  progress.start();
+  const stopSimulated = startSimulatedProgress((p) => progress.set(p));
+
   try {
-    button.disabled = true;
-    const response = await fetch(`/api/documents/${docId}`, {
+    const response = await fetch(`api/documents/${docId}`, {
       method: "DELETE",
     });
     if (!response.ok) {
@@ -246,24 +765,31 @@ documentsList.addEventListener("click", async (event) => {
       throw new Error(error.error || "No se pudo eliminar el documento.");
     }
     const documents = await response.json();
+    stopSimulated();
+    progress.set(100);
     renderDocuments(documents);
     appendLog("Documento eliminado", "success");
   } catch (error) {
     appendLog("Error al eliminar documento: " + error.message, "error");
+  } finally {
+    stopSimulated();
+    progress.finish();
   }
 });
 
 async function loadConfig() {
   try {
-    const response = await fetch("/api/config");
+    const response = await fetch("api/config");
     const data = await response.json();
     activePromptInput.value = data.context.activePrompt || "";
     additionalNotesInput.value = data.context.additionalNotes || "";
-    const promptTemplateInput = document.getElementById("promptTemplate");
-    if (promptTemplateInput) {
-      promptTemplateInput.value = data.context.promptTemplate || "";
-    }
     renderDocuments(data.documents);
+    if (Number.isFinite(Number(data?.limits?.documentUploadMaxMB))) {
+      const parsed = Number.parseInt(String(data.limits.documentUploadMaxMB), 10);
+      if (Number.isFinite(parsed) && parsed > 0) {
+        documentUploadMaxMB = parsed;
+      }
+    }
     appendLog("Contexto cargado", "success");
     renderContextPreview(data.context);
   } catch (error) {
@@ -272,17 +798,14 @@ async function loadConfig() {
 }
 
 function renderContextPreview(context = {}) {
-  const { activePrompt = "", additionalNotes = "", promptTemplate = "" } = context;
+  const { activePrompt = "", additionalNotes = "" } = context;
   previewPrompt.textContent = activePrompt || "(No definido)";
   previewNotes.textContent = additionalNotes || "(Sin notas adicionales)";
-  if (previewTemplate) {
-    previewTemplate.textContent = promptTemplate || "(Sin plantilla personalizada)";
-  }
 }
 
 async function refreshDocuments() {
   try {
-    const response = await fetch("/api/documents");
+    const response = await fetch("api/documents");
     const documents = await response.json();
     renderDocuments(documents);
   } catch (error) {
@@ -290,31 +813,169 @@ async function refreshDocuments() {
   }
 }
 
+broadcastForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+
+  const text = (broadcastMessageInput?.value || "").trim();
+
+  const sendToAll = Boolean(broadcastSendToAllInput?.checked);
+  const chatIds = sendToAll ? [] : parseChatIds(broadcastChatIdsInput?.value);
+  if (!sendToAll && chatIds.length === 0) {
+    appendLog("Broadcast: marca 'Enviar a todos' o ingresa chat_id.", "error");
+    return;
+  }
+
+  const mediaType = (broadcastMediaTypeInput?.value || "").trim();
+  const mediaSource = (broadcastMediaSourceInput?.value || "upload").trim();
+  const mediaCaption = (broadcastMediaCaptionInput?.value || "").trim();
+  const hasMedia = Boolean(mediaType);
+
+  const mediaFile = broadcastMediaFileInput?.files?.[0] || null;
+  const mediaRef = (broadcastMediaRefInput?.value || "").trim();
+
+  if (!text && !hasMedia) {
+    appendLog("Broadcast: escribe texto y/o selecciona multimedia.", "error");
+    return;
+  }
+
+  if (hasMedia && mediaSource === "upload" && !mediaFile) {
+    appendLog("Broadcast: selecciona un archivo para enviar.", "error");
+    return;
+  }
+
+  if (hasMedia && mediaSource === "ref" && !mediaRef) {
+    appendLog("Broadcast: ingresa una URL https o un file_id.", "error");
+    return;
+  }
+
+  const headers = {};
+  const secret = (broadcastSecretInput?.value || "").trim();
+  if (secret) {
+    headers["x-broadcast-secret"] = secret;
+  }
+
+  const useMultipart = hasMedia && mediaSource === "upload";
+
+  const progress = createProgressButton(broadcastSendBtn, "Enviando…", "Enviar broadcast");
+  progress.start();
+  appendLog(`Broadcast: enviando${sendToAll ? " a todos" : " a lista"}...`, "info");
+
+  let stopSimulated = null;
+  try {
+    if (useMultipart) {
+      const form = new FormData();
+      form.append("sendToAll", String(sendToAll));
+      if (!sendToAll) {
+        form.append("chatIds", chatIds.join(" "));
+      }
+      if (text) form.append("text", text);
+      if (hasMedia) form.append("mediaType", mediaType);
+      if (mediaCaption) form.append("mediaCaption", mediaCaption);
+      if (mediaFile) form.append("media", mediaFile);
+
+      const result = await xhrJson({
+        url: "send-broadcast",
+        method: "POST",
+        headers,
+        body: form,
+        onUploadProgress: (loaded, total) => {
+          progress.set((loaded / total) * 100);
+        },
+      });
+      progress.set(100);
+
+      if (!result.ok) {
+        const errMsg = result.data?.error || `HTTP ${result.status}`;
+        appendLog(`Broadcast: error - ${errMsg}`, "error");
+        renderBroadcastResult(result.data || { error: errMsg });
+        return;
+      }
+
+      const data = result.data;
+      appendLog(
+        `Broadcast: terminado. Enviados=${data?.sent ?? "?"}, Fallidos=${data?.failed ?? "?"}`,
+        "success"
+      );
+      renderBroadcastResult(data);
+      return;
+    } else {
+      stopSimulated = startSimulatedProgress((p) => progress.set(p));
+      const payload = {
+        sendToAll,
+        ...(sendToAll ? {} : { chatIds }),
+        ...(text ? { text } : {}),
+        ...(hasMedia
+          ? {
+              mediaType,
+              mediaRef,
+              mediaCaption,
+            }
+          : {}),
+      };
+
+      const response = await fetch("send-broadcast", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...headers,
+        },
+        body: JSON.stringify(payload),
+      });
+
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        const errMsg = data?.error || `HTTP ${response.status}`;
+        appendLog(`Broadcast: error - ${errMsg}`, "error");
+        renderBroadcastResult(data || { error: errMsg });
+        return;
+      }
+
+      appendLog(
+        `Broadcast: terminado. Enviados=${data?.sent ?? "?"}, Fallidos=${data?.failed ?? "?"}`,
+        "success"
+      );
+      renderBroadcastResult(data);
+      return;
+    }
+  } catch (error) {
+    appendLog("Broadcast: error de red - " + error.message, "error");
+    renderBroadcastResult({ error: error.message });
+  } finally {
+    if (typeof stopSimulated === "function") stopSimulated();
+    progress.finish();
+  }
+});
+
 contextForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const payload = {
     activePrompt: activePromptInput.value,
     additionalNotes: additionalNotesInput.value,
-    promptTemplate: document.getElementById("promptTemplate")?.value || "",
   };
 
+  const submitButton = contextForm.querySelector("button[type=submit]");
+  const progress = createProgressButton(submitButton, "Guardando…", "Guardar contexto");
+  progress.start();
+  const stopSimulated = startSimulatedProgress((p) => progress.set(p));
+
   try {
-    const response = await fetch("/api/config/context", {
+    const response = await fetch("api/config/context", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
     const data = await response.json();
+    stopSimulated();
+    progress.set(100);
     appendLog("Contexto actualizado", "success");
     activePromptInput.value = data.activePrompt || "";
     additionalNotesInput.value = data.additionalNotes || "";
-    const promptTemplateInput = document.getElementById("promptTemplate");
-    if (promptTemplateInput) {
-      promptTemplateInput.value = data.promptTemplate || "";
-    }
     renderContextPreview(data);
   } catch (error) {
     appendLog("Error al guardar el contexto: " + error.message, "error");
+  } finally {
+    stopSimulated();
+    progress.finish();
   }
 });
 
@@ -327,26 +988,61 @@ docUploadForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const formData = new FormData();
   const fileInput = document.getElementById("docFile");
+  const submitButton = docUploadForm.querySelector("button[type=submit]");
+  const progress = createProgressButton(submitButton, "Subiendo…", "Subir documento");
 
   if (!fileInput.files.length) {
     appendLog("Selecciona un archivo para subir.");
     return;
   }
 
-  formData.append("document", fileInput.files[0]);
+  const file = fileInput.files[0];
+  const maxBytes = documentUploadMaxMB * 1024 * 1024;
+  if (Number.isFinite(maxBytes) && maxBytes > 0 && file?.size && file.size > maxBytes) {
+    const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
+    appendLog(
+      `El archivo pesa ${sizeMb} MB y supera el máximo permitido (${documentUploadMaxMB} MB).`,
+      "error"
+    );
+    return;
+  }
+
+  progress.start();
+  fileInput.disabled = true;
+  appendLog("Subiendo documento…", "info");
+
+  formData.append("document", file);
   formData.append("summary", document.getElementById("docSummary").value);
 
   try {
-    const response = await fetch("/api/documents", {
+    const result = await xhrJson({
+      url: "api/documents",
       method: "POST",
       body: formData,
+      onUploadProgress: (loaded, total) => {
+        progress.set((loaded / total) * 100);
+      },
     });
-    const documents = await response.json();
+    progress.set(100);
+
+    if (!result.ok) {
+      const errMsg =
+        result.data?.error ||
+        (result.status === 413
+          ? "Payload demasiado grande (HTTP 413). Puede ser el límite del backend o de un proxy/reverse-proxy delante del servidor."
+          : `HTTP ${result.status}`);
+      throw new Error(errMsg);
+    }
+
+    const documents = result.data;
     renderDocuments(documents);
     appendLog("Documento subido", "success");
     docUploadForm.reset();
   } catch (error) {
     appendLog("Error al subir documento: " + error.message, "error");
+  } finally {
+    fileInput.disabled = false;
+    progress.finish();
   }
 });
 
@@ -359,11 +1055,9 @@ docUrlForm.addEventListener("submit", async (event) => {
   }
 
   const submitButton = docUrlForm.querySelector("button[type=submit]");
-  const originalButtonText = submitButton ? submitButton.textContent : "";
-  if (submitButton) {
-    submitButton.disabled = true;
-    submitButton.textContent = "Descargando...";
-  }
+  const progress = createProgressButton(submitButton, "Descargando…", "Descargar y procesar");
+  progress.start();
+  const stopSimulated = startSimulatedProgress((p) => progress.set(p));
   appendLog("Descargando y procesando el PDF...", "info");
 
   const payload = {
@@ -372,22 +1066,22 @@ docUrlForm.addEventListener("submit", async (event) => {
   };
 
   try {
-    const response = await fetch("/api/documents/url", {
+    const response = await fetch("api/documents/url", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
     const documents = await response.json();
+    stopSimulated();
+    progress.set(100);
     renderDocuments(documents);
     appendLog("Documento descargado y procesado", "success");
     docUrlForm.reset();
   } catch (error) {
     appendLog("Error al descargar el documento: " + error.message, "error");
   } finally {
-    if (submitButton) {
-      submitButton.disabled = false;
-      submitButton.textContent = originalButtonText || "Descargar y procesar";
-    }
+    stopSimulated();
+    progress.finish();
   }
 });
 
@@ -400,11 +1094,9 @@ docWebForm?.addEventListener("submit", async (event) => {
   }
 
   const submitButton = docWebForm.querySelector("button[type=submit]");
-  const originalButtonText = submitButton ? submitButton.textContent : "";
-  if (submitButton) {
-    submitButton.disabled = true;
-    submitButton.textContent = "Extrayendo...";
-  }
+  const progress = createProgressButton(submitButton, "Extrayendo…", "Extraer y procesar");
+  progress.start();
+  const stopSimulated = startSimulatedProgress((p) => progress.set(p));
   appendLog("Extrayendo información de la página web...", "info");
 
   const payload = {
@@ -415,7 +1107,7 @@ docWebForm?.addEventListener("submit", async (event) => {
   };
 
   try {
-    const response = await fetch("/api/documents/web", {
+    const response = await fetch("api/documents/web", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -425,16 +1117,16 @@ docWebForm?.addEventListener("submit", async (event) => {
       throw new Error(error.error || "No se pudo extraer la página.");
     }
     const documents = await response.json();
+    stopSimulated();
+    progress.set(100);
     renderDocuments(documents);
     appendLog("Página web extraída y guardada", "success");
     docWebForm.reset();
   } catch (error) {
     appendLog("Error al extraer página: " + error.message, "error");
   } finally {
-    if (submitButton) {
-      submitButton.disabled = false;
-      submitButton.textContent = originalButtonText;
-    }
+    stopSimulated();
+    progress.finish();
   }
 });
 
@@ -447,11 +1139,9 @@ docHtmlForm?.addEventListener("submit", async (event) => {
   }
 
   const submitButton = docHtmlForm.querySelector("button[type=submit]");
-  const originalButtonText = submitButton ? submitButton.textContent : "";
-  if (submitButton) {
-    submitButton.disabled = true;
-    submitButton.textContent = "Guardando...";
-  }
+  const progress = createProgressButton(submitButton, "Guardando…", "Guardar HTML");
+  progress.start();
+  const stopSimulated = startSimulatedProgress((p) => progress.set(p));
 
   const payload = {
     title: htmlTitleInput.value.trim(),
@@ -460,7 +1150,7 @@ docHtmlForm?.addEventListener("submit", async (event) => {
   };
 
   try {
-    const response = await fetch("/api/documents/html", {
+    const response = await fetch("api/documents/html", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -470,16 +1160,16 @@ docHtmlForm?.addEventListener("submit", async (event) => {
       throw new Error(error.error || "No se pudo guardar el HTML.");
     }
     const documents = await response.json();
+    stopSimulated();
+    progress.set(100);
     renderDocuments(documents);
     appendLog("HTML guardado y procesado", "success");
     docHtmlForm.reset();
   } catch (error) {
     appendLog("Error al guardar HTML: " + error.message, "error");
   } finally {
-    if (submitButton) {
-      submitButton.disabled = false;
-      submitButton.textContent = originalButtonText;
-    }
+    stopSimulated();
+    progress.finish();
   }
 });
 
@@ -492,11 +1182,9 @@ docTextForm?.addEventListener("submit", async (event) => {
   }
 
   const submitButton = docTextForm.querySelector("button[type=submit]");
-  const originalButtonText = submitButton ? submitButton.textContent : "";
-  if (submitButton) {
-    submitButton.disabled = true;
-    submitButton.textContent = "Guardando...";
-  }
+  const progress = createProgressButton(submitButton, "Guardando…", "Guardar texto");
+  progress.start();
+  const stopSimulated = startSimulatedProgress((p) => progress.set(p));
 
   const html = `<pre>${escapeHtml(text)}</pre>`;
   const payload = {
@@ -506,7 +1194,7 @@ docTextForm?.addEventListener("submit", async (event) => {
   };
 
   try {
-    const response = await fetch("/api/documents/html", {
+    const response = await fetch("api/documents/html", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -516,16 +1204,16 @@ docTextForm?.addEventListener("submit", async (event) => {
       throw new Error(error.error || "No se pudo guardar el texto.");
     }
     const documents = await response.json();
+    stopSimulated();
+    progress.set(100);
     renderDocuments(documents);
     appendLog("Texto guardado y procesado", "success");
     docTextForm.reset();
   } catch (error) {
     appendLog("Error al guardar texto: " + error.message, "error");
   } finally {
-    if (submitButton) {
-      submitButton.disabled = false;
-      submitButton.textContent = originalButtonText;
-    }
+    stopSimulated();
+    progress.finish();
   }
 });
 

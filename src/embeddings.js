@@ -54,3 +54,18 @@ export async function embedChunks(chunks) {
   }
   return embedded;
 }
+
+export async function embedChunkDescriptors(descriptors) {
+  if (!client) return [];
+  const embedded = [];
+  for (const descriptor of descriptors || []) {
+    const text = String(descriptor?.text || "").trim();
+    if (!text) continue;
+    const embedding = await getEmbedding(text);
+    if (embedding) {
+      const meta = descriptor?.meta;
+      embedded.push(meta ? { text, embedding, meta } : { text, embedding });
+    }
+  }
+  return embedded;
+}

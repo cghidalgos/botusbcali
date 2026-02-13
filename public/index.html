@@ -3,32 +3,40 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Control de Bot GPT</title>
+    <title>Facultad Ingeniería (Bot)</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
     <header>
-      <p>Operación</p>
-      <h1>Bot de la Facultad de Ingeniería</h1>
-      <p>
-        Define en qué contexto responde, sube documentos complementarios y sigue el
-        pulso...
-      </p>
+      <div class="header-brand">
+        <div class="header-logo" aria-hidden="true">
+          <svg viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M10 15.5L24 7l14 8.5V32c0 1.6-.8 3-2.2 3.8L24 43l-11.8-7.2C10.8 35 10 33.6 10 32V15.5Z" stroke="currentColor" stroke-width="2" />
+            <path d="M24 7v36" stroke="currentColor" stroke-width="2" opacity="0.6" />
+            <path d="M10 16l14 8 14-8" stroke="currentColor" stroke-width="2" opacity="0.6" />
+          </svg>
+        </div>
+        <div class="header-text">
+          <p class="header-kicker">Operación</p>
+          <h1>Facultad Ingeniería (Bot)</h1>
+          <p class="header-subtitle">
+            Configura el contexto, carga documentos y revisa el historial en un solo lugar.
+          </p>
+        </div>
+      </div>
     </header>
     <main>
       <section class="panel">
         <h2>Contexto de conversación</h2>
+        <p class="panel-hint">
+          Define cómo debe responder el bot.
+          <span class="help-tooltip" data-tooltip="Tip: agrega reglas claras (qué incluir, qué evitar) y el tono deseado. El bot usará este contexto al responder.">?</span>
+        </p>
         <form id="context-form">
           <label for="activePrompt">Prompt base</label>
           <textarea id="activePrompt" name="activePrompt" required></textarea>
           <label for="additionalNotes">Notas adicionales</label>
           <textarea id="additionalNotes" name="additionalNotes"></textarea>
-          <label for="promptTemplate">Plantilla de prompt (opcional)</label>
-          <textarea
-            id="promptTemplate"
-            name="promptTemplate"
-            placeholder="Usa {activePrompt}, {additionalNotes}, {documentNotes}, {incomingText}"
-          ></textarea>
           <button type="submit">Guardar contexto</button>
         </form>
         <div class="context-preview" id="context-preview">
@@ -37,21 +45,22 @@
           <p id="preview-prompt" class="preview-content">Cargando…</p>
           <p class="preview-label">Notas adicionales</p>
           <p id="preview-notes" class="preview-content">Cargando…</p>
-          <p class="preview-label">Plantilla de prompt</p>
-          <p id="preview-template" class="preview-content">Cargando…</p>
           <button type="button" id="edit-context-btn">Editar contexto</button>
         </div>
       </section>
 
       <section class="panel">
         <h2>Documentos de referencia</h2>
+        <p class="panel-hint">
+          Sube archivos o pega contenido. Si cargas muchos documentos, se listan ordenados (más recientes primero).
+        </p>
         <form id="doc-upload-form">
           <label for="docFile">Selecciona un archivo (PDF, Word, Excel, CSV)</label>
           <input
             type="file"
             id="docFile"
             name="document"
-            accept=".pdf,.doc,.docx,.xlsx,.csv,.html,.htm"
+            accept=".pdf,.doc,.docx,.xlsx,.csv,.txt,.html,.htm"
             required
           />
           <label for="docSummary">Resumen / etiquetas</label>
@@ -121,13 +130,95 @@
         <div class="documents" id="documents-list"></div>
       </section>
 
+      <section class="panel" id="broadcast-panel">
+        <h2>Mensajería masiva</h2>
+        <p class="panel-hint">
+          Envía un mensaje a usuarios que ya le escribieron al bot. Para seguridad, usa un secreto (si está configurado en el backend).
+        </p>
+        <form id="broadcast-form" class="inline-form">
+          <label for="broadcastMessage">Mensaje</label>
+          <textarea id="broadcastMessage" name="text" rows="4" placeholder="Texto a enviar (se envía como mensaje separado)"></textarea>
+
+          <label for="broadcastMediaType">Multimedia (opcional)</label>
+          <select id="broadcastMediaType" name="mediaType">
+            <option value="">Sin multimedia</option>
+            <option value="photo">Imagen</option>
+            <option value="video">Video</option>
+            <option value="audio">Audio</option>
+            <option value="document">Documento</option>
+          </select>
+
+          <label for="broadcastMediaSource">Fuente multimedia</label>
+          <select id="broadcastMediaSource" name="mediaSource">
+            <option value="upload" selected>Subir archivo</option>
+            <option value="ref">URL https o file_id</option>
+          </select>
+
+          <div id="broadcastMediaRefWrap">
+            <label for="broadcastMediaRef">URL/file_id</label>
+            <input id="broadcastMediaRef" name="mediaRef" type="text" placeholder="https://... o file_id" />
+          </div>
+
+          <div id="broadcastMediaFileWrap">
+            <label for="broadcastMediaFile">Archivo</label>
+            <input id="broadcastMediaFile" name="media" type="file" />
+          </div>
+
+          <label for="broadcastMediaCaption">Caption (opcional)</label>
+          <textarea id="broadcastMediaCaption" name="mediaCaption" rows="2" placeholder="Texto corto que acompaña la multimedia"></textarea>
+
+          <label>
+            <input type="checkbox" id="broadcastSendToAll" name="sendToAll" checked /> Enviar a todos
+          </label>
+
+          <label for="broadcastChatIds">chat_id (opcional si no es a todos)</label>
+          <textarea id="broadcastChatIds" name="chatIds" rows="3" placeholder="Uno por línea o separados por coma"></textarea>
+
+          <div class="broadcast-users-wrap">
+            <div style="display:flex;align-items:center;gap:.5rem;margin:.5rem 0 0;">
+              <input type="checkbox" id="broadcastSelectAll" /> <label for="broadcastSelectAll" style="margin:0">Seleccionar todos</label>
+            </div>
+            <div id="broadcast-users-list" class="documents" style="margin-top:.5rem; max-height:180px; overflow:auto; border:1px solid rgba(255,255,255,0.04); padding:.5rem; border-radius:.6rem"></div>
+          </div>
+
+          <label for="broadcastSecret">Secreto (opcional)</label>
+          <input type="password" id="broadcastSecret" name="secret" placeholder="x-broadcast-secret" autocomplete="off" />
+
+          <button type="submit" id="broadcastSendBtn">Enviar broadcast</button>
+        </form>
+
+        <details class="document-details" id="broadcast-result-wrapper">
+          <summary>Ver resultado</summary>
+          <pre id="broadcast-result">Aún no hay envíos.</pre>
+        </details>
+      </section>
+
+      <section class="panel" id="users-panel">
+        <h2>Usuarios de Telegram</h2>
+        <p class="panel-hint">Lista de usuarios que han interactuado con el bot. Puedes eliminar o responder directamente desde aquí.</p>
+
+        <div class="users-filter-bar" style="display:flex;gap:.5rem;align-items:center;margin-bottom:.6rem">
+          <div style="font-size:0.85rem;color:rgba(255,255,255,0.72);">Filtrar:</div>
+          <button class="filter-btn" data-filter="all">Todos</button>
+          <button class="filter-btn" data-filter="recent">Recientes</button>
+          <button class="filter-btn" data-filter="blocked">Bloqueados</button>
+          <button class="filter-btn" data-filter="hasUsername">Con username</button>
+          <div style="flex:1"></div>
+          <div style="font-size:0.8rem;color:rgba(255,255,255,0.6);">Resultados: <span id="users-count">0</span></div>
+        </div>
+
+        <div id="users-list" class="documents"></div>
+      </section>
+
       <section class="panel" id="log-panel">
         <h2>Actividad</h2>
+        <p class="panel-hint">Eventos recientes del sistema (cargas, errores, actualizaciones).</p>
         <div id="log"></div>
       </section>
 
       <section class="panel" id="history-panel">
         <h2>Historial de preguntas y respuestas</h2>
+        <p class="panel-hint">Se actualiza automáticamente. Úsalo para auditar lo que el bot respondió.</p>
         <button id="clear-history-btn" type="button">Limpiar historial</button>
         <div id="qa-history"></div>
       </section>

@@ -2,11 +2,18 @@ services:
   botusbcali:
     build: .
     ports:
-      - "9014:3000"
+      - "9011:3000"
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     env_file:
       - .env
     environment:
       - PORT=3000
+      - DOCUMENT_PER_DOC_LIMIT=30000
+      - DOCUMENT_TOTAL_LIMIT=60000
+      - DOCUMENT_PER_DOC_LIMIT_ALL=40000
+      - DOCUMENT_TOTAL_LIMIT_ALL=80000
     volumes:
       - ./data:/app/data
       - ./uploads:/app/uploads
