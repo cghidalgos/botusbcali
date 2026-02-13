@@ -770,7 +770,9 @@ app.post(
       console.error("Error procesando documento", processError);
     });
 
-    res.json(listDocumentsForClient());
+    const docsForClient = listDocumentsForClient();
+    console.log(`[uploads] finished /api/documents — saved=${document.originalName || document.filename} size=${document.size} documentsReturned=${(Array.isArray(docsForClient) && docsForClient.length) || 0}`);
+    res.json(docsForClient);
   }
 );
 
