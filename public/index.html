@@ -203,11 +203,15 @@
           <button class="filter-btn" data-filter="recent">Recientes</button>
           <button class="filter-btn" data-filter="blocked">Bloqueados</button>
           <button class="filter-btn" data-filter="hasUsername">Con username</button>
+
+          <input id="users-search" placeholder="Buscar por nombre o @username" style="margin-left:.6rem;padding:.4rem .6rem;border-radius:0.6rem;border:1px solid rgba(255,255,255,0.06);background:rgba(255,255,255,0.02);color:var(--text);flex:0 0 260px" />
+
           <div style="flex:1"></div>
           <div style="font-size:0.8rem;color:rgba(255,255,255,0.6);">Resultados: <span id="users-count">0</span></div>
         </div>
 
         <div id="users-list" class="documents"></div>
+        <div id="users-pagination" style="display:flex;align-items:center;gap:.5rem;margin-top:.6rem"></div>
       </section>
 
       <section class="panel" id="log-panel">
@@ -223,6 +227,19 @@
         <div id="qa-history"></div>
       </section>
     </main>
+
+    <!-- Modal: historial por usuario -->
+    <div id="user-history-modal" class="modal" aria-hidden="true">
+      <div class="modal-backdrop"></div>
+      <div class="modal-panel">
+        <div class="modal-header">
+          <strong id="modal-user-title">Conversación</strong>
+          <button id="modal-close" class="modal-close">Cerrar</button>
+        </div>
+        <div id="modal-user-history" class="modal-body"></div>
+      </div>
+    </div>
+
     <script type="module" src="/app.js"></script>
   </body>
 </html>

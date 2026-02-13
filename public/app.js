@@ -179,11 +179,14 @@ function renderHistory(history) {
     .join("");
 }
 
+let historyCache = [];
+
 async function loadHistory() {
   try {
     const res = await fetch("api/history");
     const data = await res.json();
-    renderHistory(data);
+    historyCache = Array.isArray(data) ? data : [];
+    renderHistory(historyCache);
   } catch (e) {
     qaHistoryContainer.innerHTML = '<p>Error al cargar historial.</p>';
   }
@@ -214,6 +217,8 @@ window.addEventListener("DOMContentLoaded", () => {
   loadHistory();
   loadUsers();
   initUsersFilterBar();
+  initUsersSearchAndPagination();
+  initUserHistoryModal();
   setInterval(loadHistory, DOCUMENT_POLL_INTERVAL);
   setInterval(loadUsers, DOCUMENT_POLL_INTERVAL);
 });
@@ -225,6 +230,7 @@ function initUsersFilterBar() {
       buttons.forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       usersFilter = btn.getAttribute('data-filter') || 'all';
+      currentPage = 1;
       renderUsers(usersCache || []);
       renderBroadcastUsers(usersCache || []);
     });
@@ -234,16 +240,163 @@ function initUsersFilterBar() {
   if (defaultBtn) defaultBtn.classList.add('active');
 }
 
+function debounce(fn, wait = 200) {
+  let t = null;
+  return (...args) => {
+    clearTimeout(t);
+    t = setTimeout(() => fn(...args), wait);
+  };
+}
+
+function initUsersSearchAndPagination() {
+  const search = document.getElementById('users-search');
+  const paginationWrap = document.getElementById('users-pagination');
+  if (search) {
+    search.addEventListener('input', debounce((ev) => {
+      usersQuery = (ev.target.value || '').trim();
+      currentPage = 1;
+      renderUsers(usersCache);
+      renderBroadcastUsers(usersCache);
+    }, 220));
+  }
+
+  if (paginationWrap) {
+    paginationWrap.addEventListener('click', (ev) => {
+      const btn = ev.target.closest('.page-btn');
+      if (!btn) return;
+      const action = btn.getAttribute('data-action');
+      if (action === 'prev') currentPage = Math.max(1, currentPage - 1);
+      else if (action === 'next') currentPage = currentPage + 1;
+      else if (btn.hasAttribute('data-page')) currentPage = Number(btn.getAttribute('data-page')) || 1;
+      renderUsers(usersCache);
+      // keep broadcast list synced
+      renderBroadcastUsers(usersCache);
+    });
+  }
+}
+
+function renderPagination(totalItems) {
+  const wrap = document.getElementById('users-pagination');
+  if (!wrap) return;
+  const totalPages = Math.max(1, Math.ceil(totalItems / PAGE_SIZE));
+  currentPage = Math.min(currentPage, totalPages);
+  wrap.innerHTML = '';
+
+  const info = document.createElement('div');
+  info.style.fontSize = '0.85rem';
+  info.style.color = 'rgba(255,255,255,0.7)';
+  const start = (currentPage - 1) * PAGE_SIZE + 1;
+  const end = Math.min(totalItems, currentPage * PAGE_SIZE);
+  info.textContent = `${totalItems ? `${start}-${end} de ${totalItems}` : '0 usuarios'}`;
+  wrap.appendChild(info);
+
+  const spacer = document.createElement('div');
+  spacer.style.flex = '1';
+  wrap.appendChild(spacer);
+
+  const prev = document.createElement('button');
+  prev.className = 'page-btn';
+  prev.setAttribute('data-action', 'prev');
+  prev.textContent = '« Anterior';
+  prev.disabled = currentPage <= 1;
+  wrap.appendChild(prev);
+
+  // simple page buttons (up to 7)
+  const maxButtons = 7;
+  const half = Math.floor(maxButtons / 2);
+  let startPage = Math.max(1, currentPage - half);
+  let endPage = Math.min(totalPages, startPage + maxButtons - 1);
+  if (endPage - startPage + 1 < maxButtons) startPage = Math.max(1, endPage - maxButtons + 1);
+
+  for (let p = startPage; p <= endPage; p += 1) {
+    const b = document.createElement('button');
+    b.className = 'page-btn' + (p === currentPage ? ' active' : '');
+    b.setAttribute('data-page', String(p));
+    b.textContent = String(p);
+    wrap.appendChild(b);
+  }
+
+  const next = document.createElement('button');
+  next.className = 'page-btn';
+  next.setAttribute('data-action', 'next');
+  next.textContent = 'Siguiente »';
+  next.disabled = currentPage >= totalPages;
+  wrap.appendChild(next);
+}
+
+function initUserHistoryModal() {
+  const modal = document.getElementById('user-history-modal');
+  const closeBtn = document.getElementById('modal-close');
+  if (!modal) return;
+  modal.addEventListener('click', (ev) => {
+    if (ev.target === modal.querySelector('.modal-backdrop')) closeUserHistoryModal();
+  });
+  if (closeBtn) closeBtn.addEventListener('click', closeUserHistoryModal);
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape') closeUserHistoryModal();
+  });
+}
+
+function openUserHistoryModal(title) {
+  const modal = document.getElementById('user-history-modal');
+  const titleEl = document.getElementById('modal-user-title');
+  if (!modal) return;
+  if (titleEl) titleEl.textContent = title || 'Conversación';
+  modal.setAttribute('aria-hidden', 'false');
+}
+
+function closeUserHistoryModal() {
+  const modal = document.getElementById('user-history-modal');
+  if (!modal) return;
+  modal.setAttribute('aria-hidden', 'true');
+}
+
+async function showUserHistory(chatId, displayName) {
+  if (!historyCache.length) await loadHistory();
+  const items = (historyCache || []).filter((h) => String(h.chatId) === String(chatId));
+  const container = document.getElementById('modal-user-history');
+  if (!container) return;
+  if (!items.length) {
+    container.innerHTML = `<p class="user-history-empty">No hay historial para ${escapeHtml(displayName || chatId)}.</p>`;
+    openUserHistoryModal(displayName || chatId);
+    return;
+  }
+
+  const sorted = items.slice().sort((a,b) => (b.timestamp || 0) - (a.timestamp || 0));
+  container.innerHTML = sorted
+    .map(it => `
+      <div class="user-history-entry">
+        <div class="qh">${escapeHtml(new Date(it.timestamp).toLocaleString())}</div>
+        <div class="qa"><strong>Q:</strong> ${escapeHtml(it.question)}</div>
+        <div class="qa" style="margin-top:.4rem"><strong>A:</strong> ${escapeHtml(it.answer)}</div>
+      </div>
+    `).join('');
+
+  openUserHistoryModal(displayName || chatId);
+}
+
 /* ------------------ Users UI ------------------ */
 const usersList = document.getElementById("users-list");
 const usersCountEl = document.getElementById('users-count');
 const pendingDeletes = new Map(); // chatId -> { timerId, expiresAt }
 let usersCache = [];
 let usersFilter = 'all';
+let usersQuery = '';
+const PAGE_SIZE = 20;
+let currentPage = 1;
 const RECENT_MS = 24 * 60 * 60 * 1000; // 24 horas
 
 // UI state preserved across automatic refreshes
 const broadcastSelectedIds = new Set();
+
+function userMatchesQuery(u, q) {
+  if (!q) return true;
+  const low = String(q).toLowerCase().trim();
+  const name = `${u.firstName || ''} ${u.lastName || ''}`.toLowerCase();
+  const username = String(u.username || '').toLowerCase();
+  const chatId = String(u.chatId || '');
+  return name.includes(low) || username.includes(low) || chatId.includes(low);
+}
 
 
 function userMatchesFilter(u, filter) {
@@ -266,47 +419,55 @@ function renderUsers(users) {
     return bt - at;
   }) : [];
 
-  const filtered = sorted.filter(u => userMatchesFilter(u, usersFilter));
-  if (usersCountEl) usersCountEl.textContent = String(filtered.length);
+  const filtered = sorted.filter(u => userMatchesFilter(u, usersFilter) && userMatchesQuery(u, usersQuery));
+  const total = filtered.length;
+  if (usersCountEl) usersCountEl.textContent = String(total);
 
-  if (!filtered.length) {
+  if (!total) {
     usersList.innerHTML = '<p class="empty-state">No hay usuarios que coincidan con el filtro.</p>';
+    renderPagination(0);
     return;
   }
 
-  usersList.innerHTML = filtered.map(u => {
-    const name = [u.firstName, u.lastName].filter(Boolean).join(' ') || '(sin nombre)';
-    const identity = u.username ? `@${escapeHtml(u.username)}` : `chat_id: ${escapeHtml(String(u.chatId))}`;
-    const last = u.lastInteractionAt ? new Date(u.lastInteractionAt).toLocaleString() : '';
-    const isBlocked = Boolean(u.isBlocked);
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  currentPage = Math.min(Math.max(1, currentPage), totalPages);
+  const startIndex = (currentPage - 1) * PAGE_SIZE;
+  const pageItems = filtered.slice(startIndex, startIndex + PAGE_SIZE);
 
-    const avatarSvg = `
-      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-        <path d="M12 12c2.761 0 5-2.239 5-5s-2.239-5-5-5-5 2.239-5 5 2.239 5 5 5z" fill="currentColor" opacity="0.12"/>
-        <path d="M12 13c-4.418 0-8 2.239-8 5v1h16v-1c0-2.761-3.582-5-8-5z" fill="currentColor" opacity="0.08"/>
-        <path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zm0 2c4.418 0 8 2.239 8 5v1H4v-1c0-2.761 3.582-5 8-5z" stroke="currentColor" stroke-opacity="0.6" stroke-width="0.6"/>
-      </svg>
-    `;
+  usersList.innerHTML = pageItems
+    .map((u) => {
+      const name = [u.firstName, u.lastName].filter(Boolean).join(' ') || '(sin nombre)';
+      const identity = u.username ? `@${escapeHtml(u.username)}` : `chat_id: ${escapeHtml(String(u.chatId))}`;
+      const last = u.lastInteractionAt ? new Date(u.lastInteractionAt).toLocaleString() : '';
+      const isBlocked = Boolean(u.isBlocked);
 
-    const badgeHtml = isBlocked ? `<span class="avatar-badge" title="Bloqueado">!</span>` : "";
+      const avatarSvg = `
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <path d="M12 12c2.761 0 5-2.239 5-5s-2.239-5-5-5-5 2.239-5 5 2.239 5 5 5z" fill="currentColor" opacity="0.12"/>
+          <path d="M12 13c-4.418 0-8 2.239-8 5v1h16v-1c0-2.761-3.582-5-8-5z" fill="currentColor" opacity="0.08"/>
+          <path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zm0 2c4.418 0 8 2.239 8 5v1H4v-1c0-2.761 3.582-5 8-5z" stroke="currentColor" stroke-opacity="0.6" stroke-width="0.6"/>
+        </svg>
+      `;
 
-    return `
-      <div class="user-card ${isBlocked ? 'disabled-muted' : ''}" data-chat-id="${escapeHtml(String(u.chatId))}">
-        <div class="user-avatar">${avatarSvg}${badgeHtml}</div>
-        <div class="user-meta">
-          <div class="user-name">${escapeHtml(name)}</div>
-          <div class="user-identity meta-line">${identity} • ${escapeHtml(last)}</div>
+      const badgeHtml = isBlocked ? `<span class="avatar-badge" title="Bloqueado">!</span>` : "";
 
+      return `
+        <div class="user-card ${isBlocked ? 'disabled-muted' : ''}" data-chat-id="${escapeHtml(String(u.chatId))}">
+          <div class="user-avatar">${avatarSvg}${badgeHtml}</div>
+          <div class="user-meta">
+            <button class="user-name clickable" data-chat-id="${escapeHtml(String(u.chatId))}">${escapeHtml(name)}</button>
+            <div class="user-identity meta-line">${identity} • ${escapeHtml(last)}</div>
+          </div>
+          <div class="user-actions">
+            <button class="user-reply" type="button" data-chat-id="${escapeHtml(String(u.chatId))}">Responder</button>
+            <button class="user-delete" type="button" data-chat-id="${escapeHtml(String(u.chatId))}">Eliminar</button>
+          </div>
         </div>
-        <div class="user-actions">
-          <button class="user-reply" type="button" data-chat-id="${escapeHtml(String(u.chatId))}">Responder</button>
-          <button class="user-delete" type="button" data-chat-id="${escapeHtml(String(u.chatId))}">Eliminar</button>
-        </div>
-      </div>
-    `;
-  }).join('');
+      `;
+    })
+    .join('');
 
-
+  renderPagination(total);
 }
 
 async function loadUsers() {
@@ -336,7 +497,7 @@ function renderBroadcastUsers(users) {
     return;
   }
 
-  const filtered = users.filter(u => userMatchesFilter(u, usersFilter));
+  const filtered = users.filter(u => userMatchesFilter(u, usersFilter) && userMatchesQuery(u, usersQuery));
 
   const html = filtered.map(u => {
     const name = [u.firstName, u.lastName].filter(Boolean).join(' ') || '(sin nombre)';
@@ -404,6 +565,18 @@ broadcastUsersList?.addEventListener('change', (ev) => {
   updateBroadcastChatIdsFromCheckboxes();
 });
 
+// allow clicking name/avatar in the broadcast list to open the per-user history
+broadcastUsersList?.addEventListener('click', (ev) => {
+  const label = ev.target.closest('.broadcast-user');
+  if (!label) return;
+  const id = label.querySelector('.broadcast-user-checkbox')?.getAttribute('data-chat-id');
+  if (!id) return;
+  if (ev.target.closest('.b-name') || ev.target.closest('.b-avatar')) {
+    const display = label.querySelector('.b-name')?.textContent || id;
+    showUserHistory(id, display);
+  }
+});
+
 broadcastSelectAll?.addEventListener('change', (ev) => {
   const checked = Boolean(ev.target.checked);
   document.querySelectorAll('.broadcast-user-checkbox').forEach((b) => {
@@ -418,6 +591,14 @@ broadcastSelectAll?.addEventListener('change', (ev) => {
 
 
 usersList?.addEventListener('click', async (ev) => {
+  const nameBtn = ev.target.closest('.user-name.clickable');
+  if (nameBtn) {
+    const chatId = nameBtn.getAttribute('data-chat-id');
+    const display = nameBtn.textContent || chatId;
+    showUserHistory(chatId, display);
+    return;
+  }
+
   const replyBtn = ev.target.closest('.user-reply');
   const deleteBtn = ev.target.closest('.user-delete');
   const undoBtn = ev.target.closest('.undo-restore');

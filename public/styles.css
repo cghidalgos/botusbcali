@@ -557,6 +557,7 @@ button:disabled {
   gap: 0.2rem;
 }
 .user-name { margin: 0; font-size: 0.95rem; color: rgba(255,255,255,0.95); }
+.user-name.clickable { background: transparent; border: none; padding: 0; margin: 0; cursor: pointer; color: inherit; font: inherit; text-align: left; }
 .user-identity { margin: 0; font-size: 0.78rem; color: rgba(255,255,255,0.62); }
 .user-meta .meta-line { font-size: 0.75rem; color: rgba(255,255,255,0.55); }
 
@@ -596,6 +597,24 @@ button:disabled {
 .broadcast-user .b-avatar .avatar-badge { right: -6px; bottom: -6px; position: absolute; }
 
 .disabled-muted { opacity: 0.55; }
+
+/* pagination */
+#users-pagination { color: rgba(255,255,255,0.8); }
+.page-btn { background: transparent; border: 1px solid rgba(255,255,255,0.04); color: rgba(255,255,255,0.85); padding: 0.32rem 0.6rem; border-radius: 0.5rem; cursor: pointer; }
+.page-btn.active { background: rgba(255,255,255,0.03); border-color: rgba(255,255,255,0.08); }
+
+/* modal for per-user history */
+.modal { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; z-index: 1200; }
+.modal[aria-hidden="false"] { display: flex; }
+.modal-backdrop { position: absolute; inset: 0; background: rgba(2,6,23,0.6); backdrop-filter: blur(2px); }
+.modal-panel { position: relative; width: min(920px, 96vw); max-height: 80vh; overflow: auto; background: var(--panel); border-radius: 0.75rem; padding: 1rem; border: 1px solid var(--border); box-shadow: 0 30px 60px rgba(0,0,0,0.6); }
+.modal-header { display:flex; justify-content:space-between; align-items:center; gap:0.5rem; margin-bottom:0.6rem }
+.modal-close { border:1px solid rgba(255,255,255,0.06); padding:0.35rem 0.6rem; border-radius:0.5rem; background:transparent; color:var(--text); cursor:pointer }
+.modal-body { font-size:0.9rem; color:rgba(255,255,255,0.9); }
+.user-history-entry { border:1px solid rgba(255,255,255,0.04); padding:0.6rem; border-radius:0.6rem; margin-bottom:0.5rem; background: rgba(255,255,255,0.02); }
+.user-history-entry .qh { font-weight:600; color:var(--accent); margin-bottom:0.35rem }
+.user-history-entry .qa { margin:0; color:rgba(255,255,255,0.9) }
+.user-history-empty { color:rgba(255,255,255,0.6); font-style:italic }
 
 
 
