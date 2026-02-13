@@ -630,7 +630,7 @@ usersList?.addEventListener('click', async (ev) => {
     const timeoutId = setTimeout(() => controller.abort(), 12000);
 
     try {
-      const res = await fetch(`/api/users/${encodeURIComponent(chatId)}/message`, {
+      const res = await fetch(`api/users/${encodeURIComponent(chatId)}/message`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text }),
@@ -697,7 +697,7 @@ usersList?.addEventListener('click', async (ev) => {
     const finalizeId = setTimeout(async () => {
       clearInterval(timerId);
       try {
-        const res = await fetch(`/api/users/${encodeURIComponent(chatId)}`, { method: 'DELETE' });
+        const res = await fetch(`api/users/${encodeURIComponent(chatId)}`, { method: 'DELETE' });
         if (!res.ok) throw new Error('No se pudo eliminar');
         appendLog(`Usuario ${chatId} eliminado (confirmado)`, 'success');
       } catch (e) {
