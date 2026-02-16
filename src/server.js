@@ -1331,14 +1331,6 @@ app.use((error, req, res, next) => {
   });
 });
 
-// SPA fallback for admin-ui (MUST be after all API routes)
-// Serve index.html for any non-API route
-if (fs.existsSync(adminIndexPath)) {
-  app.get("*", (req, res) => {
-    res.sendFile(adminIndexPath);
-  });
-}
-
 const port = process.env.PORT || 3000;
 
 async function startServer() {
