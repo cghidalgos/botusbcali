@@ -8,10 +8,10 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
   const apiTarget = env.VITE_API_TARGET || "http://localhost:3000";
 
-  // Base URL: Cuando npm run build se ejecuta, mode es "production"
-  // Cuando npm run dev se ejecuta, mode es "development"
-  // En producción usa "/" porque _APP_BASE_PATH middleware ya elimina /botusbcali
-  const base = mode === "production" ? "/" : "/admin/";
+  // Base URL para assets y routing
+  // En producción: /botusbcali/ para que el HTML tenga rutas absolutas correctas
+  // En desarrollo: /admin/ para desarrollo local
+  const base = mode === "production" ? "/botusbcali/" : "/admin/";
 
   return {
     base,
