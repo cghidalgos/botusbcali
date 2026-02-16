@@ -50,6 +50,20 @@ export function addHistoryEntry(entry) {
   persistHistory();
 }
 
+export function getHistoryByChatId(chatId, limit = 100) {
+  loadHistory();
+  const normalized = String(chatId);
+  const filtered = history.filter((item) => String(item.chatId) === normalized);
+  return filtered.slice(-limit);
+}
+
+export function clearHistoryForChatId(chatId) {
+  loadHistory();
+  const normalized = String(chatId);
+  history = history.filter((item) => String(item.chatId) !== normalized);
+  persistHistory();
+}
+
 export function clearHistory() {
   loadHistory();
   history = [];

@@ -43,13 +43,18 @@ export async function getEmbedding(text) {
   return response.data?.[0]?.embedding || null;
 }
 
-export async function embedChunks(chunks) {
+export async function embedChunks(chunks, onProgress) {
   if (!client) return [];
   const embedded = [];
-  for (const chunk of chunks) {
+  const total = chunks.length;
+  for (let index = 0; index < total; index += 1) {
+    const chunk = chunks[index];
     const embedding = await getEmbedding(chunk);
     if (embedding) {
       embedded.push({ text: chunk, embedding });
+    }
+    if (onProgress) {
+      onProgress(index + 1, total);
     }
   }
   return embedded;

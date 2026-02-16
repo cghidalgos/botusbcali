@@ -7,10 +7,6 @@ const contextPath = path.join(dataDir, "context.json");
 const contextState = {
   activePrompt: "Eres un Asistente que se llama FacIng y eres cordial, y atiendes a los usuarios de manera amable. \nRespondes  todo sobre la facultad de ingeniería  (costos, eventos, salones, profesores, etc). Si no encuentras alg, menciona que estas en proceso de aprenderlo.",
   additionalNotes: "No inventes costos ni valores. Cita el programa y el año cuando aparezca en el texto.",
-  promptTemplate:
-    "Actúa como un asistente experto en las instrucciones provistas.\n" +
-    "Responde con información de costos del año 2026.  no muestres del 2025.\n" +
-    "Responde en texto plano, sin Markdown ni encabezados.",
 };
 
 async function ensureDataDir() {
@@ -26,9 +22,6 @@ async function loadContext() {
     }
     if (typeof parsed.additionalNotes === "string") {
       contextState.additionalNotes = parsed.additionalNotes;
-    }
-    if (typeof parsed.promptTemplate === "string") {
-      contextState.promptTemplate = parsed.promptTemplate;
     }
   } catch (error) {
     if (error.code !== "ENOENT") {
@@ -62,7 +55,3 @@ export function updateAdditionalNotes(notes) {
   persistContext();
 }
 
-export function updatePromptTemplate(template) {
-  contextState.promptTemplate = template;
-  persistContext();
-}

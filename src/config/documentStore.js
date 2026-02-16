@@ -50,6 +50,8 @@ export function addDocument(metadata) {
     id: crypto.randomUUID(),
     createdAt: new Date().toISOString(),
     status: "uploaded",
+    progress: 0,
+    stage: "Pendiente",
     manualSummary: summary || "",
     autoSummary: "",
     extractedText: "",
