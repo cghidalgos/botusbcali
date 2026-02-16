@@ -63,8 +63,8 @@ const UsersPanel = () => {
   const handleBlockUser = async (userId: string, currentlyBlocked: boolean) => {
     try {
       const updated = await blockUser(userId, !currentlyBlocked);
-      setUsers((prev) => prev.map((user) => (user.userId === userId ? updated : user)));
-      toast.success(updated.blocked ? "Usuario bloqueado" : "Usuario desbloqueado");
+      setUsers((prev) => prev.map((user) => (user.chatId === userId ? updated : user)));
+      toast.success(updated.isBlocked ? "Usuario bloqueado" : "Usuario desbloqueado");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "No se pudo actualizar el estado del usuario.");
     }
@@ -118,33 +118,39 @@ const UsersPanel = () => {
 
         {!loading && users.length > 0 && (
           <div className="space-y-2 max-h-96 overflow-y-auto">
-            {users.map((user) => (
-              <button
-                key={user.userId}
-                type="button"
-                onClick={() => handleSelectUser(String(user.userId))}
-                className={`w-full text-left p-3 rounded-lg border transition-colors ${
-                  selectedUserId === String(user.userId)
-                    ? "border-primary bg-primary/10"
-                    : "border-border hover:bg-muted"
-                }`}
-              >
-                <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm font-semibold text-foreground truncate">
-                      {user.name || `Usuario ${user.userId}`}
-                    </p>
-                    <p className="text-xs text-muted-foreground truncate">ID: {user.userId}</p>
-                    <p className="text-xs text-muted-foreground mt-1">
-                      Mensajes: {user.messageCount}
-                    </p>
+            {users.map((user) => {
+              const displayName = user.firstName && user.lastName 
+                ? `${user.firstName} ${user.lastName}`.trim()
+                : user.firstName || user.username || `Usuario ${user.chatId}`;
+              
+              return (
+                <button
+                  key={user.chatId}
+                  type="button"
+                  onClick={() => handleSelectUser(String(user.chatId))}
+                  className={`w-full text-left p-3 rounded-lg border transition-colors ${
+                    selectedUserId === String(user.chatId)
+                      ? "border-primary bg-primary/10"
+                      : "border-border hover:bg-muted"
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-semibold text-foreground truncate">
+                        {displayName}
+                      </p>
+                      <p className="text-xs text-muted-foreground truncate">ID: {user.chatId}</p>
+                      {user.username && (
+                        <p className="text-xs text-muted-foreground truncate">@{user.username}</p>
+                      )}
+                    </div>
+                    {user.isBlocked && (
+                      <Lock className="w-4 h-4 text-destructive shrink-0 mt-1" />
+                    )}
                   </div>
-                  {user.blocked && (
-                    <Lock className="w-4 h-4 text-destructive shrink-0 mt-1" />
-                  )}
-                </div>
-              </button>
-            ))}
+                </button>
+              );
+            })}
           </div>
         )}
       </div>
@@ -155,101 +161,103 @@ const UsersPanel = () => {
           <>
             {/* User Info */}
             <div className="panel">
-              {users.find((u) => String(u.userId) === selectedUserId) && (
-                <>
-                  <div className="flex items-center justify-between mb-4">
-                    <h3 className="text-lg font-semibold text-foreground">Detalles del usuario</h3>
-                    <div className="flex gap-2">
-                      {users.find((u) => String(u.userId) === selectedUserId)?.blocked && (
-                        <span className="text-xs font-semibold text-destructive bg-destructive/10 px-2 py-1 rounded">
-                          BLOQUEADO
-                        </span>
-                      )}
+              {(() => {
+                const selectedUser = users.find((u) => String(u.chatId) === selectedUserId);
+                if (!selectedUser) return null;
+                
+                const displayName = selectedUser.firstName && selectedUser.lastName
+                  ? `${selectedUser.firstName} ${selectedUser.lastName}`.trim()
+                  : selectedUser.firstName || selectedUser.username || `Usuario ${selectedUser.chatId}`;
+                
+                return (
+                  <>
+                    <div className="flex items-center justify-between mb-4">
+                      <h3 className="text-lg font-semibold text-foreground">Detalles del usuario</h3>
+                      <div className="flex gap-2">
+                        {selectedUser.isBlocked && (
+                          <span className="text-xs font-semibold text-destructive bg-destructive/10 px-2 py-1 rounded">
+                            BLOQUEADO
+                          </span>
+                        )}
+                      </div>
                     </div>
-                  </div>
 
-                  {users.find((u) => String(u.userId) === selectedUserId) && (
                     <div className="grid grid-cols-2 gap-4 mb-6">
-                      {users.find((u) => String(u.userId) === selectedUserId)?.name && (
+                      <div>
+                        <p className="text-xs text-muted-foreground">Nombre</p>
+                        <p className="text-sm font-semibold text-foreground">
+                          {displayName}
+                        </p>
+                      </div>
+                      {selectedUser.username && (
                         <div>
-                          <p className="text-xs text-muted-foreground">Nombre</p>
-                          <p className="text-sm font-semibold text-foreground">
-                            {users.find((u) => String(u.userId) === selectedUserId)?.name}
-                          </p>
+                          <p className="text-xs text-muted-foreground">Usuario</p>
+                          <p className="text-sm font-semibold text-foreground">@{selectedUser.username}</p>
                         </div>
                       )}
                       <div>
                         <p className="text-xs text-muted-foreground">ID Usuario</p>
-                        <p className="text-sm font-semibold text-foreground">{selectedUserId}</p>
+                        <p className="text-sm font-semibold text-foreground">{selectedUser.chatId}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-muted-foreground">Tipo</p>
+                        <p className="text-sm font-semibold text-foreground">{selectedUser.type || 'N/A'}</p>
                       </div>
                       <div>
                         <p className="text-xs text-muted-foreground">Primer contacto</p>
                         <p className="text-xs text-foreground">
-                          {formatDate(
-                            users.find((u) => String(u.userId) === selectedUserId)?.firstSeen
-                          )}
+                          {formatDate(selectedUser.firstInteractionAt)}
                         </p>
                       </div>
                       <div>
                         <p className="text-xs text-muted-foreground">Último contacto</p>
                         <p className="text-xs text-foreground">
-                          {formatDate(
-                            users.find((u) => String(u.userId) === selectedUserId)?.lastSeen
-                          )}
+                          {formatDate(selectedUser.lastInteractionAt)}
                         </p>
                       </div>
-                      <div>
-                        <p className="text-xs text-muted-foreground">Total de mensajes</p>
-                        <p className="text-sm font-semibold text-foreground">
-                          {users.find((u) => String(u.userId) === selectedUserId)?.messageCount}
-                        </p>
-                      </div>
-                      <div>
-                        <p className="text-xs text-muted-foreground">Estilo de conversación</p>
-                        <p className="text-sm font-semibold text-foreground capitalize">
-                          {users.find((u) => String(u.userId) === selectedUserId)?.conversationStyle}
-                        </p>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Action Buttons */}
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      className={`btn-sm ${
-                        users.find((u) => String(u.userId) === selectedUserId)?.blocked
-                          ? "btn-success"
-                          : "btn-warning"
-                      }`}
-                      onClick={() => {
-                        const user = users.find((u) => String(u.userId) === selectedUserId);
-                        if (user) handleBlockUser(String(user.userId), user.blocked);
-                      }}
-                    >
-                      {users.find((u) => String(u.userId) === selectedUserId)?.blocked ? (
-                        <>
-                          <LockOpen className="w-4 h-4 mr-1" />
-                          Desbloquear
-                        </>
-                      ) : (
-                        <>
-                          <Lock className="w-4 h-4 mr-1" />
-                          Bloquear
-                        </>
+                      {selectedUser.lastError && (
+                        <div className="col-span-2">
+                          <p className="text-xs text-muted-foreground">Último error</p>
+                          <p className="text-xs text-destructive">{selectedUser.lastError}</p>
+                        </div>
                       )}
-                    </button>
-                    <button
-                      type="button"
-                      className="btn-sm btn-danger"
-                      onClick={() => handleClearHistory(String(selectedUserId))}
-                    >
-                      <Trash2 className="w-4 h-4 mr-1" />
-                      Limpiar historial
-                    </button>
-                  </div>
-                </>
-              )}
+                    </div>
+
+                    {/* Action Buttons */}
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        className={`btn-sm ${
+                          selectedUser.isBlocked
+                            ? "btn-success"
+                            : "btn-warning"
+                        }`}
+                        onClick={() => handleBlockUser(String(selectedUser.chatId), selectedUser.isBlocked)}
+                      >
+                        {selectedUser.isBlocked ? (
+                          <>
+                            <LockOpen className="w-4 h-4 mr-1" />
+                            Desbloquear
+                          </>
+                        ) : (
+                          <>
+                            <Lock className="w-4 h-4 mr-1" />
+                            Bloquear
+                          </>
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-sm btn-danger"
+                        onClick={() => handleClearHistory(String(selectedUserId))}
+                      >
+                        <Trash2 className="w-4 h-4 mr-1" />
+                        Limpiar historial
+                      </button>
+                    </div>
+                  </>
+                );
+              })()}
             </div>
 
             {/* Direct Message */}

@@ -78,15 +78,19 @@ export interface ProfileStats {
 }
 
 export interface UserProfile {
-  userId: string | number;
-  name: string | null;
-  firstSeen: string;
-  lastSeen: string;
-  messageCount: number;
-  topics: string[];
-  preferences: Record<string, any>;
-  conversationStyle: "formal" | "casual";
-  blocked: boolean;
+  chatId: string | number;
+  username?: string;
+  firstName?: string;
+  lastName?: string;
+  type?: string;
+  firstInteractionAt?: string;
+  lastInteractionAt?: string;
+  isBlocked: boolean;
+  blockedAt?: string | null;
+  lastError?: string | null;
+  messageCount?: number;
+  updatedAt?: string;
+  createdAt?: string;
 }
 
 export interface CategoryInfo {
