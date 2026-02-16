@@ -16,5 +16,16 @@ RUN npm ci --omit=dev && npm cache clean --force
 
 COPY . .
 
+# Build admin-ui before starting the server
+# Temporarily set NODE_ENV to development to install devDependencies (vite, etc.)
+WORKDIR /app/admin-ui
+ENV NODE_ENV=development
+RUN npm ci
+RUN npm run build
+
+# Return to app root and reset NODE_ENV to production
+WORKDIR /app
+ENV NODE_ENV=production
+
 EXPOSE 3000
-CMD ["npm", "start"]
+CMD ["node", "src/server.js"]

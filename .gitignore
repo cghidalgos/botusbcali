@@ -5,3 +5,7 @@ src/.DS_Store
 uploads/
 data/*.json
 tmp.pdf
+public/
+# Generated data files
+data/learning.json
+data/categories.json

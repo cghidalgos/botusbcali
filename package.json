@@ -4,8 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node src/server.js",
-    "dev": "nodemon src/server.js --ext js,json --watch src",
+    "start": "npm run build:admin && node src/server.js",
+    "dev": "npm run build:admin && nodemon src/server.js --ext js,json --watch src",
+    "dev:admin": "cd admin-ui && npm run dev",
+    "build:admin": "cd admin-ui && npm install --legacy-peer-deps && npm run build",
     "set:webhook": "node scripts/setWebhook.js"
   },
   "dependencies": {

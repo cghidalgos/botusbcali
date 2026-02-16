@@ -1,31 +1,59 @@
 # BotTelegram
 
-Un starter para un bot de Telegram conectado a GPT con una interfaz de configuración.
+Un starter para un bot de Telegram conectado a GPT con una **interfaz de administración completa** (Admin UI).
+
+## ✨ Nuevo: Admin UI
+
+Se ha integrado una interfaz moderna de React + TypeScript + Vite que permite gestionar completamente el bot:
+
+- **Dashboard**: Vista general del estado y estadísticas
+- **Contexto**: Editar prompt base y configuración del bot
+- **Documentos**: Subir, gestionar y procesar archivos de referencia
+- **Usuarios**: Gestionar usuarios de Telegram
+- **Historial**: Ver todas las conversaciones
+- **Categorías**: Organizar y gestionar categorías de respuestas
+- **Aprendizaje**: Rastrear patrones y preguntas frecuentes
+- **Análisis**: Estadísticas de uso, caché y ahorros de API
+
+Ver [ADMIN_UI_SETUP.md](./ADMIN_UI_SETUP.md) para detalles.
 
 ## ¿Qué incluye?
-- `src/server.js`: Express que expone la UI, endpoints para contexto/documentos y el webhook de Telegram.
-- `src/openai.js`: ensambla prompt combinando contexto y documentos antes de llamar a la API de OpenAI.
-- `src/documentProcessor.js`: extrae fragmentos legibles desde cada archivo y mantiene el estado/resumen en memoria.
-- `public/`: interfaz para editar el prompt/escribir notas, subir documentos y ver la actividad.
-- `pdf-parse`: dependencia usada por el backend para convertir automáticamente PDFs a texto antes de resumirlos.
+- `admin-ui/`: Interfaz React completa con Vite, TypeScript y Tailwind
+- `src/server.js`: Express que sirve la UI, endpoints para gestión y webhook de Telegram
+- `src/openai.js`: Ensambla prompt combinando contexto y documentos antes de llamar a GPT
+- `src/documentProcessor.js`: Extrae fragmentos legibles desde archivos y mantiene resúmenes
+- `src/config/`: Stores de datos para contexto, documentos, usuarios, aprendizaje y categorías
+- `pdf-parse`: Conversión automática de PDFs a texto para procesamiento
 
 ## Variables de entorno
-- Define las claves en un archivo `.env` en la raíz (ya existe un ejemplo) y se cargan con `dotenv`.
-- `TELEGRAM_BOT_TOKEN` (requerido): token del bot Telegram.
-- `OPENAI_API_KEY` (recomendado): clave para la API de OpenAI.
-- `OPENAI_MODEL` (opcional): modelo GPT a usar (por defecto `gpt-4o-mini`).
-- `PORT` (opcional): puerto donde corre el servidor (por defecto `3000`).
-- `WEBHOOK_BASE` (opcional durante pruebas locales): URL pública de tu servidor (por ejemplo ngrok) usada para registrar `/webhook`.
-- `DOCUMENT_UPLOAD_MAX_MB` (opcional): tamaño máximo permitido para subir archivos en `POST /api/documents` (por defecto `60`).
+- Define las claves en un archivo `.env` en la raíz (ya existe un ejemplo) y se cargan con `dotenv`
+- `TELEGRAM_BOT_TOKEN` (requerido): token del bot Telegram
+- `OPENAI_API_KEY` (recomendado): clave para la API de OpenAI
+- `OPENAI_MODEL` (opcional): modelo GPT a usar (por defecto `gpt-4o-mini`)
+- `PORT` (opcional): puerto donde corre el servidor (por defecto `3000`)
+- `WEBHOOK_BASE` (opcional durante pruebas locales): URL pública de tu servidor usada para registrar `/webhook`
+- `DOCUMENT_UPLOAD_MAX_MB` (opcional): tamaño máximo permitido para subir archivos (por defecto `60`)
 
-> Ejecuta `npm install` después de clonar o actualizar el repositorio para incluir `pdf-parse`, que el flujo de documentos requiere para procesar PDFs.
+> Ejecuta `npm install` después de clonar o actualizar el repositorio
 
-## Instalación y ejecución
+## 🚀 Instalación y ejecución
+
+### Producción
 ```bash
 npm install
-npm run dev # para desarrollo con recarga
-npm start   # producción
+npm start   # Buildea admin-ui y inicia el servidor
 ```
+
+### Desarrollo
+```bash
+# Terminal 1: Servidor con hot reload
+npm run dev
+
+# Terminal 2: Admin UI con hot reload  
+npm run dev:admin
+```
+
+La interfaz estará disponible en `http://localhost:3000`
 
 ## Docker / Docker Compose
 
@@ -33,13 +61,13 @@ Este repo incluye soporte para correr el backend + UI dentro de un contenedor.
 
 ### 1) Variables de entorno
 
-- Copia el archivo de ejemplo y completa tus claves:
+Copia el archivo de ejemplo y completa tus claves:
 
 ```bash
 cp .env.example .env
 ```
 
-- Importante: no subas `.env` al repositorio (está ignorado por git).
+**Importante**: no subas `.env` al repositorio (está ignorado por git).
 
 ### 2) Levantar con Docker Compose (recomendado)
 
@@ -84,6 +112,51 @@ Si al subir un PDF ves `HTTP 413 (Payload Too Large)`, puede deberse a:
 - Límite del backend (multer): sube `DOCUMENT_UPLOAD_MAX_MB` en tu `.env`.
 - Límite de un proxy/reverse-proxy (nginx, ingress, Cloudflare, etc.) delante del Node: debes aumentar el límite del proxy (por ejemplo en nginx `client_max_body_size`).
 
+Checklist rápida para producción:
+
+1. Define `DOCUMENT_UPLOAD_MAX_MB` (ej. `120`) en tu `.env`.
+2. Asegura que el proxy tenga un límite **igual o mayor**.
+3. Reinicia contenedor y proxy.
+
+Ejemplo Nginx (sitio bajo `/botusbcali/`):
+
+```nginx
+server {
+	# ... tu config existente ...
+
+	client_max_body_size 120M;
+
+	location /botusbcali/ {
+		proxy_pass http://127.0.0.1:9011/;
+		proxy_http_version 1.1;
+		proxy_set_header Host $host;
+		proxy_set_header X-Real-IP $remote_addr;
+		proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+		proxy_set_header X-Forwarded-Proto $scheme;
+	}
+}
+```
+
+Luego:
+
+```bash
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+Ejemplo Apache (si usas `ProxyPass`):
+
+```apache
+LimitRequestBody 125829120
+ProxyPass /botusbcali/ http://127.0.0.1:9011/
+ProxyPassReverse /botusbcali/ http://127.0.0.1:9011/
+```
+
+Luego:
+
+```bash
+sudo apachectl configtest && sudo systemctl reload apache2
+```
+
 ## Configurar el webhook de Telegram
 1. Asegura que tu servidor esté accesible (puedes usar una URL pública o ngrok).
 2. Guarda la URL pública en el `.env` (por ejemplo `WEBHOOK_BASE=https://4236d35b5c75.ngrok-free.app`).
@@ -102,11 +175,28 @@ docker-compose exec botusbcali npm run set:webhook
 ```
 
 ## UI de control
-Abre [http://localhost:3000](http://localhost:3000) y:
-1. Define el prompt base y notas adicionales para que GPT entienda el contexto.
-2. Sube documentos para fortalecer la base de conocimiento; cada archivo crea una tarjeta en la UI.
-3. Observa el panel de actividad para seguir cambios y cargas.
-4. Cada documento recorre estados (`Subido`, `Procesando`, `Extrayendo texto`, `Listo`, `Error`) que ayudan a comprender si aún se está generando texto desde un PDF y muestran el resumen generado automáticamente para que sepas qué verá GPT. Si el extractor no logra recuperar contenido legible, puedes agregar un resumen manual adicional.
+
+Abre [http://localhost:3000](http://localhost:3000/) y accede a la **Admin UI** completamente funcional:
+
+- **Dashboard**: Resumen del estado del bot
+- **Contexto**: Define el prompt base y notas adicionales para que GPT entienda el contexto
+- **Documentos**: Sube archivos (PDF, Word, Excel, etc.) para fortalecer la base de conocimiento
+  - Cada archivo muestra su estado de procesamiento
+  - Resúmenes automáticos y manuales
+  - Soporte para URLs y extracción web
+- **Usuarios**: Gestiona usuarios de Telegram
+  - Ver historial de cada usuario
+  - Bloquear/desbloquear usuarios
+  - Estadísticas de actividad
+- **Historial**: Ver todas las preguntas y respuestas
+- **Categorías**: Organiza tipos de respuestas
+- **Aprendizaje**: Rastrea patrones y preguntas frecuentes
+- **Actividad**: Monitor en tiempo real
+- **Caché**: Ver ahorros de API y estadísticas
+
+Cada documento recorre estados (`Subido`, `Procesando`, `Extrayendo texto`, `Listo`, `Error`) para ayudarte a entender el progreso de procesamiento.
+
+Para más detalles sobre admin-ui, ver [ADMIN_UI_SETUP.md](./ADMIN_UI_SETUP.md) y [TESTING_ADMIN_UI.md](./TESTING_ADMIN_UI.md)
 
 ## Usar todos los documentos (lo más completo posible)
 

@@ -1,0 +1,180 @@
+@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 40 30% 97%;
+    --foreground: 220 25% 12%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 220 25% 12%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 220 25% 12%;
+
+    --primary: 16 85% 60%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 40 25% 93%;
+    --secondary-foreground: 220 25% 20%;
+
+    --muted: 40 15% 94%;
+    --muted-foreground: 220 10% 50%;
+
+    --accent: 145 50% 45%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 72% 55%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 220 15% 90%;
+    --input: 220 15% 90%;
+    --ring: 16 85% 60%;
+
+    --radius: 0.75rem;
+
+    --sidebar-background: 0 0% 98%;
+    --sidebar-foreground: 240 5.3% 26.1%;
+    --sidebar-primary: 240 5.9% 10%;
+    --sidebar-primary-foreground: 0 0% 98%;
+    --sidebar-accent: 240 4.8% 95.9%;
+    --sidebar-accent-foreground: 240 5.9% 10%;
+    --sidebar-border: 220 13% 91%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
+
+    --panel-shadow: 0 4px 24px -4px hsla(220, 20%, 20%, 0.08);
+    --panel-border: 220 20% 93%;
+  }
+
+  .dark {
+    --background: 220 25% 8%;
+    --foreground: 40 20% 95%;
+    --card: 220 20% 12%;
+    --card-foreground: 40 20% 95%;
+    --popover: 220 20% 12%;
+    --popover-foreground: 40 20% 95%;
+    --primary: 16 85% 60%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 220 15% 18%;
+    --secondary-foreground: 40 20% 90%;
+    --muted: 220 15% 18%;
+    --muted-foreground: 220 10% 60%;
+    --accent: 145 50% 45%;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 220 15% 20%;
+    --input: 220 15% 20%;
+    --ring: 16 85% 60%;
+    --sidebar-background: 240 5.9% 10%;
+    --sidebar-foreground: 240 4.8% 95.9%;
+    --sidebar-primary: 224.3 76.3% 48%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 240 3.7% 15.9%;
+    --sidebar-accent-foreground: 240 4.8% 95.9%;
+    --sidebar-border: 240 3.7% 15.9%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans;
+    font-family: "Space Grotesk", system-ui, sans-serif;
+  }
+}
+
+@layer components {
+  .panel {
+    @apply bg-card rounded-2xl border border-border p-6;
+    box-shadow: var(--panel-shadow);
+  }
+
+  .panel-title {
+    @apply text-lg font-semibold text-foreground mb-4 flex items-center gap-2;
+  }
+
+  .form-label {
+    @apply block text-sm font-medium text-muted-foreground mb-1.5 mt-4 first:mt-0;
+  }
+
+  .form-input {
+    @apply w-full rounded-xl border border-input bg-secondary/50 px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary transition-colors;
+  }
+
+  .form-textarea {
+    @apply form-input min-h-[100px] resize-y;
+  }
+
+  .btn-primary {
+    @apply inline-flex items-center justify-center rounded-full bg-primary text-primary-foreground px-6 py-2.5 text-sm font-semibold shadow-md hover:opacity-90 transition-all cursor-pointer border-none;
+    box-shadow: 0 8px 20px -4px hsla(16, 85%, 60%, 0.35);
+  }
+
+  .btn-secondary {
+    @apply inline-flex items-center justify-center rounded-full border border-border bg-card text-foreground px-6 py-2.5 text-sm font-semibold hover:bg-secondary transition-all cursor-pointer;
+  }
+
+  .btn-danger {
+    @apply inline-flex items-center justify-center rounded-lg border border-destructive/30 bg-transparent text-destructive px-3 py-1.5 text-xs font-medium hover:bg-destructive/10 transition-all cursor-pointer;
+  }
+
+  .status-badge {
+    @apply inline-flex items-center rounded-full px-3 py-1 text-xs font-medium;
+  }
+
+  .status-uploaded {
+    @apply bg-muted text-muted-foreground;
+  }
+
+  .status-processing {
+    @apply bg-primary/15 text-primary;
+  }
+
+  .status-ready {
+    @apply bg-accent/15 text-accent;
+  }
+
+  .status-error {
+    @apply bg-destructive/15 text-destructive;
+  }
+
+  .status-extracting {
+    @apply bg-yellow-100 text-yellow-700;
+  }
+
+  .preview-box {
+    @apply mt-4 p-4 rounded-xl border border-border bg-secondary/30;
+  }
+
+  .preview-label {
+    @apply text-xs uppercase tracking-wider text-muted-foreground mt-3 first:mt-0;
+  }
+
+  .preview-value {
+    @apply text-sm text-foreground mt-0.5;
+  }
+
+  .log-entry {
+    @apply text-sm py-2 border-b border-border last:border-b-0 text-muted-foreground;
+  }
+
+  .doc-card {
+    @apply flex justify-between items-start p-4 rounded-xl border border-border bg-secondary/20 gap-4;
+  }
+
+  .qa-entry {
+    @apply rounded-xl border border-border p-4 mb-3 bg-secondary/20;
+  }
+
+  .inline-form {
+    @apply mt-4 grid gap-2 pt-4 border-t border-border;
+  }
+}
