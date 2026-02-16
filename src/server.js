@@ -34,6 +34,9 @@ import { getHistory, clearHistory } from "./config/historyStore.js";
 import { chunkText, embedChunks, embedChunkDescriptors } from "./embeddings.js";
 import { chunkByStructure, extractHtmlSectionsFromHtml } from "./structuredChunking.js";
 import { createTelegramService, classifyTelegramSendError } from "./services/telegramService.js";
+import { getLearningPatterns, addLearningPattern, updateLearningPattern, deleteLearningPattern, getLearningStats, learningReady } from "./config/learningStore.js";
+import { getCategories, addCategory, deleteCategory, updateCategory, getSuggestedCategories, getSuggestedCategoriesPending, approveSuggestedCategory, rejectSuggestedCategory, updateSuggestedCategory, categoriesReady } from "./config/categoriesStore.js";
+import { getCacheStats, recordCacheHit, recordCacheEntry, cacheReady } from "./config/cacheStore.js";
 
 dotenv.config();
 
@@ -92,7 +95,25 @@ if (_APP_BASE_PATH) {
   });
 }
 
-app.use(express.static(path.join(__dirname, "..", "public")));
+// Serve admin-ui build if it exists (MUST be BEFORE public/ to take precedence)
+// In production, admin-ui is available at / (after _APP_BASE_PATH strips /botusbcali)
+const adminDistPath = path.join(__dirname, "..", "admin-ui", "dist");
+const adminIndexPath = path.join(adminDistPath, "index.html");
+if (fs.existsSync(adminDistPath)) {
+  // Serve assets folder with specific route (prevents catch-all from intercepting)
+  app.use("/assets", express.static(path.join(adminDistPath, "assets"), {
+    maxAge: "1y",
+    immutable: true,
+  }));
+  
+  // Serve other static files from root (with index: false to not auto-serve index.html)
+  app.use(express.static(adminDistPath, {
+    index: false,
+  }));
+  
+  // SPA fallback for admin-ui routes (must be at the end, after all API routes)
+  // This will be registered but should be moved after API routes
+}
 
 // API: historial de preguntas y respuestas
 app.get("/api/history", (req, res) => {
@@ -1095,12 +1116,188 @@ app.delete("/api/documents/:id", async (req, res) => {
   res.json(listDocumentsForClient());
 });
 
-// SPA fallback — return index.html for non-API routes so the UI works when served under a subpath
+// API: Cache stats
+app.get("/api/cache/stats", (req, res) => {
+  res.json(getCacheStats());
+});
+
+// API: Learning patterns
+app.get("/api/learning/stats", (req, res) => {
+  res.json(getLearningStats());
+});
+
+app.get("/api/learning/patterns", (req, res) => {
+  res.json(getLearningPatterns());
+});
+
+app.put("/api/learning/patterns/:id", (req, res) => {
+  try {
+    const updated = updateLearningPattern(req.params.id, req.body);
+    res.json(updated);
+  } catch (error) {
+    res.status(404).json({ error: error.message });
+  }
+});
+
+app.delete("/api/learning/patterns/:id", (req, res) => {
+  const deleted = deleteLearningPattern(req.params.id);
+  if (!deleted) {
+    return res.status(404).json({ error: "Patrón no encontrado" });
+  }
+  res.json({ ok: true });
+});
+
+// API: Profile stats
+app.get("/api/profiles/stats", (req, res) => {
+  const users = listTelegramUsers();
+  res.json({
+    totalUsers: users.length,
+    usersWithNames: users.filter(u => u.name).length,
+    activeUsers: users.filter(u => {
+      const lastActivity = u.lastSeen || u.firstSeen;
+      const dayAgo = Date.now() - (24 * 60 * 60 * 1000);
+      return new Date(lastActivity).getTime() > dayAgo;
+    }).length,
+  });
+});
+
+// API: User history
+app.get("/api/users/:userId/history", (req, res) => {
+  // This would require enhanced history tracking per user
+  // For now, return empty array or integrate with document history
+  res.json([]);
+});
+
+app.post("/api/users/:userId/history/clear", (req, res) => {
+  // Clear user-specific history if tracked
+  res.json({ ok: true });
+});
+
+// API: User block status
+app.post("/api/users/:userId/block", (req, res) => {
+  const { blocked } = req.body;
+  try {
+    const user = listTelegramUsers().find(u => String(u.id) === String(req.params.userId));
+    if (!user) {
+      return res.status(404).json({ error: "Usuario no encontrado" });
+    }
+    
+    if (blocked) {
+      markTelegramUserBlocked(req.params.userId, true);
+    }
+    
+    res.json({
+      userId: req.params.userId,
+      blocked: blocked || false,
+      name: user.name,
+      firstSeen: user.firstSeen,
+      lastSeen: user.lastSeen,
+      messageCount: user.messageCount || 0,
+      topics: user.topics || [],
+      preferences: user.preferences || {},
+      conversationStyle: "casual",
+      blocked: blocked || false,
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// API: Categories
+app.get("/api/categories", (req, res) => {
+  const categories = getCategories();
+  res.json({
+    categories,
+    total: categories.length,
+  });
+});
+
+app.delete("/api/categories/:name", (req, res) => {
+  const deleted = deleteCategory(req.params.name);
+  if (!deleted) {
+    return res.status(404).json({ error: "Categoría no encontrada" });
+  }
+  res.json({ ok: true });
+});
+
+// API: Suggested categories
+app.get("/api/suggested-categories", (req, res) => {
+  const suggested = getSuggestedCategories();
+  res.json({
+    suggested,
+    total: suggested.length,
+  });
+});
+
+app.get("/api/suggested-categories/pending", (req, res) => {
+  const pending = getSuggestedCategoriesPending();
+  res.json({
+    suggested: pending,
+    total: pending.length,
+  });
+});
+
+app.post("/api/suggested-categories/:id/approve", (req, res) => {
+  try {
+    const { approverUserId } = req.body;
+    const approved = approveSuggestedCategory(req.params.id, approverUserId);
+    res.json({
+      ok: true,
+      category: approved.name,
+      message: `Categoría ${approved.name} aprobada`,
+    });
+  } catch (error) {
+    res.status(404).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+app.post("/api/suggested-categories/:id/reject", (req, res) => {
+  try {
+    rejectSuggestedCategory(req.params.id);
+    res.json({
+      ok: true,
+      message: "Sugerencia rechazada",
+    });
+  } catch (error) {
+    res.status(404).json({
+      ok: false,
+      message: error.message,
+    });
+  }
+});
+
+app.put("/api/suggested-categories/:id", (req, res) => {
+  try {
+    const updated = updateSuggestedCategory(req.params.id, req.body);
+    res.json({
+      ok: true,
+      category: updated,
+    });
+  } catch (error) {
+    res.status(404).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+// SPA fallback — serve admin-ui index.html for non-API routes
 app.get('*', (req, res, next) => {
   const wantsJson =
     req.path.startsWith('/api/') || req.path === '/send-broadcast' || req.path === '/webhook' || req.path.startsWith('/uploads/') || req.path.endsWith('.map');
   if (wantsJson) return next();
-  return res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
+  
+  // Serve admin-ui index.html if it exists (for SPA routing)
+  const adminIndexPath = path.join(__dirname, '..', 'admin-ui', 'dist', 'index.html');
+  if (fs.existsSync(adminIndexPath)) {
+    return res.sendFile(adminIndexPath);
+  }
+  
+  // Fallback: return 404 if admin-ui is not built
+  return res.status(404).send('Admin UI not found. Please build admin-ui.');
 });
 
 app.use((error, req, res, next) => {
@@ -1138,10 +1335,18 @@ app.use((error, req, res, next) => {
   });
 });
 
+// SPA fallback for admin-ui (MUST be after all API routes)
+// Serve index.html for any non-API route
+if (fs.existsSync(adminIndexPath)) {
+  app.get("*", (req, res) => {
+    res.sendFile(adminIndexPath);
+  });
+}
+
 const port = process.env.PORT || 3000;
 
 async function startServer() {
-  await Promise.all([contextReady, documentsReady, memoryReady, usersReady]);
+  await Promise.all([contextReady, documentsReady, memoryReady, usersReady, learningReady, categoriesReady, cacheReady]);
   app.listen(port, () => {
     console.log(`Server listening on port ${port}`);
   });
