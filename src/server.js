@@ -1001,6 +1001,23 @@ app.post(
       return res.status(400).json({ error: "No document uploaded." });
     }
 
+    // Validar tamaño (máximo 10MB)
+    const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+    if (req.file.size > MAX_FILE_SIZE) {
+      // Eliminar archivo
+      await fs.promises.unlink(req.file.path).catch(() => {});
+      return res.status(413).json({
+        error: `Archivo demasiado grande. Máximo permitido: 10MB. Tamaño: ${(req.file.size / 1024 / 1024).toFixed(2)}MB`,
+      });
+    }
+
+    // Advertencia si se acerca al límite
+    const WARNING_THRESHOLD = 8 * 1024 * 1024; // 8MB
+    let warning = null;
+    if (req.file.size > WARNING_THRESHOLD) {
+      warning = `Archivo grande (${(req.file.size / 1024 / 1024).toFixed(2)}MB). El procesamiento puede ser lento.`;
+    }
+
     const summary = typeof req.body.summary === "string" ? req.body.summary : "";
 
     let filePath = req.file.path;
@@ -1031,7 +1048,11 @@ app.post(
       console.error("Error procesando documento", processError);
     });
 
-    res.json(listDocuments());
+    const response = listDocuments();
+    if (warning) {
+      response.warning = warning;
+    }
+    res.json(response);
   }
 );
 

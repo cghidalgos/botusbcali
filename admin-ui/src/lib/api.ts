@@ -277,6 +277,12 @@ export async function getCategories(): Promise<CategoryInfo[]> {
   return response.categories || [];
 }
 
+export async function deleteCategory(name: string): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(`/api/categories/${name}`, {
+    method: "DELETE",
+  });
+}
+
 export async function getSuggestedCategories(): Promise<SuggestedCategory[]> {
   const response = await request<SuggestedCategoriesResponse>("/api/suggested-categories");
   return response.suggested || [];

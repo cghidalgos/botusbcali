@@ -2,13 +2,17 @@ import fs from "fs/promises";
 import pdfParse from "pdf-parse";
 import { spawn } from "child_process";
 import { updateDocument } from "./config/documentStore.js";
+import { storeSearchIndex } from "./config/searchIndexStore.js";
 import os from "os";
 import path from "path";
 import mammoth from "mammoth";
 import WordExtractor from "word-extractor";
 import ExcelJS from "exceljs";
 import { load } from "cheerio";
-import { chunkText, embedChunks } from "./embeddings.js";
+import {
+  createIntelligentChunks,
+  createChunkedIndex,
+} from "./chunkedSearchEngine.js";
 import { extractAndUpdateDataFromDocument } from "./dataExtractor.js";
 
 const PREVIEW_BYTES = 8192;
@@ -97,9 +101,28 @@ function isHtmlDocument(document) {
 }
 
 async function extractPdfText(filePath) {
-  const buffer = await fs.readFile(filePath);
-  const { text } = await pdfParse(buffer);
-  return String(text ?? "");
+  try {
+    const buffer = await fs.readFile(filePath);
+    const parsed = await pdfParse(buffer);
+    const text = String(parsed.text ?? "").trim();
+    
+    if (!text) {
+      console.warn(`[PDF] No se extrajo texto con pdfParse de ${filePath}, intentando información de metadatos`);
+      // Intentar extraer información de metadatos
+      if (parsed.metadata?.Title) {
+        return parsed.metadata.Title + "\n" + (parsed.metadata.Subject || "");
+      }
+      if (parsed.metadata?.Subject) {
+        return parsed.metadata.Subject;
+      }
+    }
+    
+    console.log(`[PDF] ✓ Extraídos ${text.length} caracteres de ${filePath}`);
+    return text;
+  } catch (error) {
+    console.error(`[PDF] Error extrayendo texto: ${error.message}`);
+    return "";
+  }
 }
 
 async function extractDocxText(filePath) {
@@ -301,6 +324,7 @@ export async function processDocument(document) {
     if (isPdfDocument(document)) {
       updateDocument(document.id, { status: "extracting", progress: 20, stage: "Extrayendo PDF" });
       sourceText = await extractPdfText(document.path);
+      console.log(`[PDF] sourceText length después de extractPdfText: ${sourceText.length}`);
     } else if (isDocxDocument(document)) {
       updateDocument(document.id, { status: "extracting", progress: 20, stage: "Extrayendo Word" });
       sourceText = await extractDocxText(document.path);
@@ -323,23 +347,31 @@ export async function processDocument(document) {
     updateDocument(document.id, { progress: 45, stage: "Procesando texto" });
     let usedOcr = false;
     if (isPdfDocument(document) && (!sourceText || sourceText.trim().length < 80)) {
+      console.log(`[OCR] PDF sin texto suficiente (${sourceText?.length || 0} chars), intentando OCR...`);
       try {
         updateDocument(document.id, { progress: 60 });
-        updateDocument(document.id, { stage: "OCR" });
+        updateDocument(document.id, { stage: "OCR con Tesseract" });
         const ocrResult = await runTesseract(document.path, (current, total) => {
           const pct = total > 0 ? 60 + (current / total) * 12 : 65;
           updateDocument(document.id, { progress: clampProgress(pct) });
         });
         if (ocrResult && ocrResult.trim()) {
+          console.log(`[OCR] ✓ OCR extrajo ${ocrResult.length} caracteres`);
           sourceText = ocrResult;
           usedOcr = true;
+        } else {
+          console.warn(`[OCR] OCR ejecutado pero retornó texto vacío`);
         }
         updateDocument(document.id, { progress: 70 });
       } catch (ocrError) {
-        console.error(`OCR Tesseract fallido para ${document.id}:`, ocrError);
+        console.warn(`[OCR] Tesseract no disponible (${ocrError.message}). PDF será indexado sin OCR.`);
+        // No bloqueamos el procesamiento si OCR falla
       }
+    } else if (sourceText && sourceText.trim().length >= 80) {
+      console.log(`[PDF] ✓ Texto suficiente extraído sin OCR (${sourceText.length} chars)`);
     }
     const limitedText = sourceText ? sourceText.slice(0, MAX_EXTRACTED_TEXT) : "";
+    console.log(`[DOCUMENT] limitedText final: ${limitedText.length} caracteres para ${document.originalName}`);
     const summary =
       buildSummary(limitedText, document) || document.manualSummary || "Sin texto legible";
 
@@ -359,30 +391,60 @@ export async function processDocument(document) {
     }
 
     let chunks = [];
+    let searchIndex = null;
     if (limitedText) {
       try {
-        const textChunks = chunkText(limitedText);
-        updateDocument(document.id, { progress: 80, stage: "Indexando embeddings" });
-        chunks = await embedChunks(textChunks, (current, total) => {
-          const pct = total > 0 ? 80 + (current / total) * 18 : 90;
-          updateDocument(document.id, { progress: clampProgress(pct) });
-        });
+        updateDocument(document.id, { progress: 80, stage: "Indexando (Chunking inteligente)" });
+        // Crear chunks inteligentes detectando estructura
+        const intelligentChunks = createIntelligentChunks(
+          limitedText,
+          document.originalName
+        );
+        console.log(`[CHUNKING] Chunks inteligentes creados: ${intelligentChunks.length}`);
+        
+        // Crear índice BM25 por chunks
+        searchIndex = createChunkedIndex(
+          intelligentChunks,
+          document.id,
+          document.originalName
+        );
+        // Para la UI: convertir chunks a formato simple
+        chunks = intelligentChunks.slice(0, 50).map((c) => ({
+          text: c.text.slice(0, 300),
+          type: c.type,
+          section: c.section,
+          embedding: null,
+        }));
+        console.log(
+          `[CHUNKING] ${searchIndex.totalChunks} chunks creados para ${document.originalName}`
+        );
         updateDocument(document.id, { progress: 98, stage: "Finalizando" });
-      } catch (embedError) {
-        console.error(`Embeddings fallidos para ${document.id}:`, embedError);
+      } catch (indexError) {
+        console.error(`Indexación fallida para ${document.id}:`, indexError);
       }
+    } else {
+      console.warn(`[CHUNKING] No se crean chunks porque limitedText está vacío para ${document.originalName}`);
     }
 
     updateDocument(document.id, {
       autoSummary: summary,
       extractedText: limitedText,
       chunks,
+      searchIndex, // Guardar índice para búsquedas futuras
       usedOcr,
       status: "ready",
       progress: 100,
       stage: "Listo",
       processedAt: new Date().toISOString(),
     });
+
+    // Guardar índice de búsqueda BM25 para el documento
+    if (searchIndex) {
+      await storeSearchIndex(document.id, document.originalName, searchIndex);
+      console.log(
+        `[SEARCH-INDEX] Índice BM25 guardado para: ${document.originalName}`
+      );
+    }
   } catch (error) {
     updateDocument(document.id, {
       status: "error",

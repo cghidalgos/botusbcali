@@ -1,5 +1,12 @@
 FROM node:20-slim
 
+# Instalar Tesseract OCR para extraer texto de PDFs escaneados
+RUN apt-get update && apt-get install -y \
+    tesseract-ocr \
+    libtesseract-dev \
+    poppler-utils \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 ENV NODE_ENV=production
 

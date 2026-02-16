@@ -5,6 +5,8 @@ import { addHistoryEntry } from "./config/historyStore.js";
 import { getMemory, setMemory } from "./config/memoryStore.js";
 import { getEmbedding } from "./embeddings.js";
 import { findCachedGPTResponse, saveCachedGPTResponse } from "./gptCache.js";
+import { hierarchicalSearch, extractContextWithAdjacent } from "./chunkedSearchEngine.js";
+import { getAllSearchIndices } from "./config/searchIndexStore.js";
 
 dotenv.config();
 
@@ -223,6 +225,94 @@ export async function composeResponse({ incomingText, context, documents, chatId
   const rawQuestion = String(incomingText || "");
   const normalizedQuestion = normalizeForSearch(rawQuestion);
   const memory = chatId ? getMemory(chatId) : "";
+  
+  // ==================== BÚSQUEDA BM25 ====================
+  console.log(`[QUERY] Procesando pregunta: "${rawQuestion}"`);
+  
+  // Detectar consultas de listado (requieren más resultados)
+  const isListQuery = /^\s*(qué|cuáles?|cuántos?|cuántas?|todos?|todas?|dame|muestra|lista|listado|enumera)/i.test(rawQuestion);
+  
+  const MIN_BM25_SCORE = 0.4; // 40% de relevancia mínima
+  const docIndices = getAllSearchIndices();
+  
+  console.log(`[BM25] Índices disponibles: ${docIndices.length} documento(s) indexado(s)`);
+  
+  if (docIndices.length > 0) {
+    const topK = isListQuery ? 10 : 5;
+    console.log(`[BM25] Buscando en ${docIndices.length} documentos indexados...`);
+    console.log(`[BM25] Query type: ${isListQuery ? 'LISTADO (top-10)' : 'ESPECÍFICA (top-5)'}`);
+    
+    const searchResults = hierarchicalSearch(rawQuestion, docIndices, topK);
+    
+    if (searchResults && searchResults.length > 0) {
+      const preview = searchResults.map((r, i) => 
+        `${i+1}. Score=${Math.round(r.score*100)}% "${r.chunk.text.slice(0, 50)}..."`
+      ).join(' | ');
+      console.log(`[BM25] Encontrados ${searchResults.length} resultado(s): ${preview}`);
+
+const bestResult = searchResults[0];
+      const scorePercent = Math.round(bestResult.score * 100);
+      
+      if (bestResult.score >= MIN_BM25_SCORE) {
+        console.log(`[BM25] ✓ Encontrado con relevancia ${scorePercent}%, procesando con GPT...`);
+        
+        // Extraer contexto ampliado (chunks vecinos)
+        const contextText = extractContextWithAdjacent(searchResults, 2);
+        console.log(`[BM25+GPT] Contexto extraído: ${contextText.length} caracteres`);
+        
+        // Construir prompt para GPT con contexto BM25
+        const processingPrompt = `Contexto relevante:\n${contextText}\n\nPregunta: ${rawQuestion}`;
+        
+        const messages = [
+          {
+            role: "system",
+            content: activePrompt || "Eres un asistente académico útil.",
+          },
+          {
+            role: "user",
+            content: processingPrompt,
+          },
+        ];
+        
+        try {
+          const response = await client.chat.completions.create({
+            model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+            messages,
+            temperature: 0.2,
+            max_tokens: 1000,
+          });
+          
+          const answer = response.choices?.[0]?.message?.content?.trim() || "No tengo esa información.";
+          
+          console.log(`[BM25+GPT] ✓ Respuesta generada (${answer.length} chars)`);
+          
+          // Guardar en cache si está habilitado
+          if (useCache) {
+            await saveCachedGPTResponse(incomingText, documents, answer);
+            console.log(`[CACHE] 💾 Guardada nueva respuesta (total: ${await (async () => {
+              const { countCachedResponses } = await import("./gptCache.js");
+              return countCachedResponses();
+            })()})`);
+          }
+          
+          return answer;
+        } catch (error) {
+          console.error(`[BM25+GPT] ❌ Error llamando a GPT:`, error);
+          // Continuar con método tradicional si falla GPT
+        }
+      } else {
+        console.log(`[BM25] ⚠️  Relevancia baja (${scorePercent}%), usando GPT puro...`);
+      }
+    } else {
+      console.log(`[BM25] ❌ No se encontraron resultados`);
+    }
+  } else {
+    console.log(`[BM25] ⚠️  No hay índices disponibles, fallback a método tradicional`);
+  }
+  
+  // ==================== MÉTODO TRADICIONAL ====================
+  console.log(`[GPT-PURE] Usando método tradicional (embeddings + keywords)`);
+  
   const stopTokens = new Set([
     "quien",
     "quién",

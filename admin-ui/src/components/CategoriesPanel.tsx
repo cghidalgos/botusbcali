@@ -7,6 +7,7 @@ import {
   rejectSuggestedCategory,
   deleteSuggestedCategory,
   updateSuggestedCategory,
+  deleteCategory,
   getCategories,
   formatDate,
   type SuggestedCategory,
@@ -82,6 +83,17 @@ const CategoriesPanel = () => {
       await deleteSuggestedCategory(id);
       toast.success("Categoría eliminada");
       setSelectedCategory(null);
+      loadCategories();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "No se pudo eliminar la categoría.");
+    }
+  };
+
+  const handleDeleteActiveCategory = async (categoryName: string) => {
+    if (!confirm(`¿Seguro que deseas eliminar la categoría "${categoryName}" del sistema?`)) return;
+    try {
+      await deleteCategory(categoryName);
+      toast.success("Categoría eliminada del sistema");
       loadCategories();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "No se pudo eliminar la categoría.");
@@ -180,7 +192,16 @@ const CategoriesPanel = () => {
                           {category.keywordsCount} palabras clave • {category.patternsCount} patrones
                         </p>
                       </div>
-                      <span className="text-xs font-semibold text-green-700 bg-green-200 px-2 py-1 rounded whitespace-nowrap">ACTIVA</span>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-semibold text-green-700 bg-green-200 px-2 py-1 rounded whitespace-nowrap">ACTIVA</span>
+                        <button
+                          onClick={() => handleDeleteActiveCategory(category.name)}
+                          className="p-1.5 text-red-600 hover:bg-red-100 rounded-md transition-colors"
+                          title="Eliminar categoría"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
                     </div>
                   </div>
                 ))}
