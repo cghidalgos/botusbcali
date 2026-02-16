@@ -8,5 +8,12 @@ RUN npm ci --omit=dev && npm cache clean --force
 
 COPY . .
 
+# Build admin UI (Vite) and publish to public/admin
+RUN NODE_ENV=development npm --prefix admin-ui install --include=dev \
+	&& npm --prefix admin-ui run build \
+	&& rm -rf public/* \
+	&& cp -r admin-ui/dist/* public/ \
+	&& rm -rf admin-ui/node_modules
+
 EXPOSE 3000
 CMD ["npm", "start"]

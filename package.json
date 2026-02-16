@@ -6,7 +6,16 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js --ext js,json --watch src",
-    "set:webhook": "node scripts/setWebhook.js"
+    "ui:dev": "npm --prefix admin-ui run dev",
+    "ui:build": "npm --prefix admin-ui run build",
+    "ui:preview": "npm --prefix admin-ui run preview",
+    "set:webhook": "node scripts/setWebhook.js",
+    "test:router": "node test/testRouter.js",
+    "test:classifiers": "node test/compareClassifiers.js",
+    "verify:docs": "node scripts/verifyDocuments.js",
+    "learning:stats": "node scripts/learningStats.js",
+    "cache:stats": "node scripts/cacheStats.js",
+    "profiles:stats": "node scripts/profileStats.js"
   },
   "dependencies": {
     "axios": "^1.7.0",

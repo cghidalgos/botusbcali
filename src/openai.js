@@ -4,6 +4,7 @@ import OpenAI from "openai";
 import { addHistoryEntry } from "./config/historyStore.js";
 import { getMemory, setMemory } from "./config/memoryStore.js";
 import { getEmbedding } from "./embeddings.js";
+import { findCachedGPTResponse, saveCachedGPTResponse } from "./gptCache.js";
 
 dotenv.config();
 
@@ -44,6 +45,7 @@ async function buildMemorySummary({ previous, question, answer, model }) {
       { role: "user", content: combined },
     ],
     temperature: 0.2,
+    max_tokens: 500, // Para resumen de memoria
   });
   return response.choices?.[0]?.message?.content?.trim()?.slice(0, 2000) || combined.slice(-4000);
 }
@@ -207,7 +209,17 @@ function getFieldValue(row, ...candidates) {
 }
 
 export async function composeResponse({ incomingText, context, documents, chatId }) {
-  const { activePrompt, additionalNotes, promptTemplate } = context ?? {};
+  // Buscar en cache primero (si está habilitado)
+  const useCache = process.env.GPT_CACHE_ENABLED !== "false";
+  if (useCache) {
+    const cached = await findCachedGPTResponse(incomingText, documents);
+    if (cached) {
+      console.log(`[CACHE] 🎯 Respuesta desde cache (similarity: ${cached.similarity.toFixed(2)}, hits: ${cached.hits})`);
+      return cached.answer;
+    }
+  }
+  
+  const { activePrompt, additionalNotes } = context ?? {};
   const rawQuestion = String(incomingText || "");
   const normalizedQuestion = normalizeForSearch(rawQuestion);
   const memory = chatId ? getMemory(chatId) : "";
@@ -658,70 +670,46 @@ export async function composeResponse({ incomingText, context, documents, chatId
 
   const defaultPrompt = [
     "Actúa como un asistente experto en las instrucciones provistas.",
-    "Responde usando la información de los documentos y el texto extraído, tambien de https://usbcali.edu.co/facultad/ingenieria/ y/o con inromacion basica sobre los programas de ingenieria.",
-    "Si el usuario pide toda la información, entrega el texto completo del documento relevante.",
-    "Responde con información de costos del año 2026.  no muestres del 2025.",
+    "Prioridad de respuesta (en orden): 1) Contexto de conversacion configurado, 2) Documentos subidos, 3) Memoria de conversacion, 4) Conocimiento general.",
+    "Si hay conflicto entre el contexto configurado y otras fuentes, sigue el contexto configurado.",
+    "Responde usando SOLO la informacion del contexto configurado y los documentos subidos. Si no esta ahi, di que no tienes esa informacion.",
+    "Si el usuario pide toda la informacion, entrega el texto completo del documento relevante.",
+    "Responde con informacion de costos del ano 2026. No muestres del 2025.",
     "Responde en texto plano, sin Markdown ni encabezados.",
-    activePrompt && `Contexto base: ${activePrompt}`,
-    additionalNotes && `Notas adicionales: ${additionalNotes}`,
-    memoryBlock,
-    documentNotes && `Documentos: ${documentNotes}`,
+    activePrompt && `Contexto base (prioridad alta): ${activePrompt}`,
+    additionalNotes && `Notas adicionales (prioridad alta): ${additionalNotes}`,
+    documentNotes && `Documentos relevantes (prioridad alta): ${documentNotes}`,
     fullDocBlock,
     finalSnippets.length && `Fragmentos relevantes:\n${finalSnippets.join("\n")}`,
+    memoryBlock,
     `Pregunta: ${incomingText}`,
   ]
     .filter(Boolean)
     .join("\n");
 
-  const trimmedTemplate = promptTemplate?.trim();
-  let assembledPrompt = trimmedTemplate
-    ? trimmedTemplate
-        .replaceAll("{activePrompt}", activePrompt || "")
-        .replaceAll("{additionalNotes}", additionalNotes || "")
-        .replaceAll("{documentNotes}", documentNotes || "")
-        .replaceAll("{incomingText}", incomingText || "")
-    : defaultPrompt;
-
-  if (trimmedTemplate) {
-    if (!trimmedTemplate.includes("{activePrompt}") && activePrompt) {
-      assembledPrompt += `\nContexto base: ${activePrompt}`;
-    }
-    if (!trimmedTemplate.includes("{additionalNotes}") && additionalNotes) {
-      assembledPrompt += `\nNotas adicionales: ${additionalNotes}`;
-    }
-    if (!trimmedTemplate.includes("{documentNotes}") && documentNotes) {
-      assembledPrompt += `\nDocumentos: ${documentNotes}`;
-    }
-    if (!trimmedTemplate.includes("Memoria de conversación") && memoryBlock) {
-      assembledPrompt += `\n${memoryBlock}`;
-    }
-    if (!trimmedTemplate.includes("DOCUMENTO COMPLETO") && fullDocBlock) {
-      assembledPrompt += `\n${fullDocBlock}`;
-    }
-    if (!trimmedTemplate.includes("Fragmentos relevantes") && finalSnippets.length) {
-      assembledPrompt += `\nFragmentos relevantes:\n${finalSnippets.join("\n")}`;
-    }
-    if (!trimmedTemplate.includes("{incomingText}")) {
-      assembledPrompt += `\nPregunta: ${incomingText}`;
-    }
-  }
+  const assembledPrompt = defaultPrompt;
 
   if (!client) {
     return `OPENAI_API_KEY no configurada. Esta es la petición armada:\n${assembledPrompt}`;
   }
 
   const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
+  const maxTokens = parseInt(process.env.OPENAI_MAX_TOKENS) || 300;
+  
+  // Usar solo el contexto configurado en la interfaz como prompt del sistema
+  const systemPrompt = String(activePrompt || "").trim() || "Eres un asistente virtual útil y profesional.";
+  
   const response = await client.chat.completions.create({
     model,
     messages: [
       {
         role: "system",
-        content:
-          "Eres un asistente que responde siguiendo el contexto y documentos cargados. Si preguntan por un docente (p. ej., '¿Quién es X?'), responde con su rol y muestra sus títulos y correo exactamente como aparecen en el texto extraído.",
+        content: systemPrompt
       },
       { role: "user", content: assembledPrompt },
     ],
-    temperature: 0.2,
+    temperature: 0.3, // Un poco más natural
+    max_tokens: maxTokens,
   });
 
   const answer = response.choices?.[0]?.message?.content?.trim() ?? "No se obtuvo respuesta.";
@@ -738,6 +726,13 @@ export async function composeResponse({ incomingText, context, documents, chatId
     } catch (memoryError) {
       console.error("Memoria no pudo actualizarse", memoryError);
     }
+  }
+
+  // Guardar en cache (si está habilitado)
+  if (useCache && answer) {
+    saveCachedGPTResponse(incomingText, answer, documents).catch(err => {
+      console.error("[CACHE] Error guardando:", err.message);
+    });
   }
 
   // Guardar en historial

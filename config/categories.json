@@ -1,0 +1,137 @@
+{
+  "profesores": {
+    "enabled": true,
+    "singular": "profesor",
+    "plural": "profesores",
+    "dataFile": "profesores.json",
+    "keywords": [
+      "profesor", "profesores", "docente", "docentes", "maestro", "maestra",
+      "teacher", "dr", "dra", "doctor", "doctora"
+    ],
+    "patterns": [
+      "profesor|docente|dr\\.?|dra\\.?",
+      "quién da|quién dicta|quién enseña",
+      "profesor de|docente de"
+    ],
+    "listPatterns": [
+      "todos", "cuántos", "lista", "todos los", "ver todos"
+    ],
+    "schema": {
+      "id": "string",
+      "nombre": "string",
+      "materias": "array",
+      "email": "string",
+      "telefono": "string"
+    }
+  },
+
+  "materias": {
+    "enabled": true,
+    "singular": "materia",
+    "plural": "materias",
+    "dataFile": "materias.json",
+    "keywords": [
+      "materia", "materias", "asignatura", "asignaturas", "curso", "cursos",
+      "cálculo", "calculo", "programación", "programacion", "álgebra", "algebra",
+      "bases de datos", "inteligencia artificial"
+    ],
+    "patterns": [
+      "materia|asignatura|curso",
+      "qué materia|cuántos créditos",
+      "ver materias|lista de materias"
+    ],
+    "listPatterns": [
+      "todos", "cuántas", "lista", "todas las", "ver todas"
+    ],
+    "schema": {
+      "id": "string",
+      "nombre": "string",
+      "codigo": "string",
+      "creditos": "number",
+      "semestre": "number"
+    }
+  },
+
+  "horarios": {
+    "enabled": true,
+    "singular": "horario",
+    "plural": "horarios",
+    "dataFile": "horarios.json",
+    "keywords": [
+      "horario", "horarios", "schedule", "hora", "día", "dias",
+      "lunes", "martes", "miércoles", "jueves", "viernes", "sábado",
+      "salón", "salon", "aula", "edificio", "lab", "laboratorio"
+    ],
+    "patterns": [
+      "horario|hora|día|dias",
+      "qué hora|a qué hora|cuándo es",
+      "dónde es|salón de"
+    ],
+    "listPatterns": [
+      "todos", "lista", "todos los", "ver todos"
+    ],
+    "schema": {
+      "id": "string",
+      "materia": "string",
+      "profesor": "string",
+      "dias": "array",
+      "horaInicio": "string",
+      "horaFin": "string",
+      "salon": "string"
+    }
+  },
+
+  "becas": {
+    "enabled": true,
+    "singular": "beca",
+    "plural": "becas",
+    "dataFile": "becas.json",
+    "keywords": [
+      "beca", "becas", "scholarship", "ayuda económica", "ayuda economica",
+      "financiamiento", "crédito educativo", "credito educativo",
+      "excelencia", "deportiva", "socioeconómica", "socioeconomica"
+    ],
+    "patterns": [
+      "beca|becas",
+      "cómo conseguir|como conseguir|cómo obtener|como obtener",
+      "requisitos para|solicitar beca"
+    ],
+    "listPatterns": [
+      "todas", "cuántas", "lista", "todas las", "ver todas"
+    ],
+    "schema": {
+      "id": "string",
+      "nombre": "string",
+      "tipo": "string",
+      "cobertura": "number",
+      "requisitos": "array"
+    }
+  },
+
+  "coordinadores": {
+    "enabled": true,
+    "singular": "coordinador",
+    "plural": "coordinadores",
+    "dataFile": "coordinadores.json",
+    "keywords": [
+      "coordinador", "coordinadora", "coordinación", "coordinacion",
+      "director", "directora", "jefe", "bienestar estudiantil", "bienestar"
+    ],
+    "patterns": [
+      "coordinador|director|jefe",
+      "quién es el|quién coordina|quien es el|quien coordina",
+      "contacto del|oficina del"
+    ],
+    "listPatterns": [
+      "todos", "lista", "todos los", "ver todos"
+    ],
+    "schema": {
+      "id": "string",
+      "nombre": "string",
+      "cargo": "string",
+      "email": "string",
+      "telefono": "string",
+      "oficina": "string"
+    }
+  }
+}

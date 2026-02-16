@@ -9,6 +9,7 @@ import WordExtractor from "word-extractor";
 import ExcelJS from "exceljs";
 import { load } from "cheerio";
 import { chunkText, embedChunks } from "./embeddings.js";
+import { extractAndUpdateDataFromDocument } from "./dataExtractor.js";
 
 const PREVIEW_BYTES = 8192;
 const PDF_MIME_TYPES = new Set(["application/pdf"]);
@@ -112,7 +113,7 @@ async function extractDocText(filePath) {
   return String(document?.getBody?.() ?? "");
 }
 
-async function extractSpreadsheetText(filePath, document) {
+async function extractSpreadsheetText(filePath, document, onProgress) {
   const workbook = new ExcelJS.Workbook();
   if (isCsvDocument(document)) {
     await workbook.csv.readFile(filePath);
@@ -121,6 +122,11 @@ async function extractSpreadsheetText(filePath, document) {
   }
 
   const lines = [];
+  const totalRows = workbook.worksheets.reduce(
+    (sum, worksheet) => sum + (worksheet.rowCount || 0),
+    0
+  );
+  let processedRows = 0;
   workbook.eachSheet((worksheet) => {
     lines.push(`Hoja: ${worksheet.name}`);
     worksheet.eachRow((row) => {
@@ -128,6 +134,10 @@ async function extractSpreadsheetText(filePath, document) {
         .slice(1)
         .map((cell) => (cell == null ? "" : String(cell)));
       lines.push(values.join("\t"));
+      processedRows += 1;
+      if (onProgress && totalRows > 0 && (processedRows % 25 === 0 || processedRows === totalRows)) {
+        onProgress(processedRows, totalRows);
+      }
     });
     lines.push("");
   });
@@ -197,7 +207,7 @@ async function renderPdfToImages(pdfPath) {
   return { tempDir, images };
 }
 
-async function runTesseract(pdfPath) {
+async function runTesseract(pdfPath, onProgress) {
   const langs = (process.env.TESSERACT_LANG || "spa")
     .split(/[\s,]+/)
     .filter(Boolean);
@@ -212,7 +222,9 @@ async function runTesseract(pdfPath) {
   const tryDirectPdf = async () => {
     for (const lang of candidates) {
       try {
-        return await runOnTarget(pdfPath, lang);
+        const result = await runOnTarget(pdfPath, lang);
+        if (onProgress) onProgress(1, 1);
+        return result;
       } catch (error) {
         lastError = error;
         if (String(error.message).includes("Failed loading language")) {
@@ -242,7 +254,8 @@ async function runTesseract(pdfPath) {
       throw new Error("No se pudieron generar imágenes del PDF");
     }
     let combined = "";
-    for (const image of rendered.images) {
+    for (let index = 0; index < rendered.images.length; index += 1) {
+      const image = rendered.images[index];
       let pageText = "";
       for (const lang of candidates) {
         try {
@@ -258,6 +271,9 @@ async function runTesseract(pdfPath) {
       if (pageText) {
         combined += `${pageText}\n`;
       }
+      if (onProgress) {
+        onProgress(index + 1, rendered.images.length);
+      }
     }
     if (!combined.trim()) {
       throw lastError || new Error("OCR sin texto");
@@ -271,39 +287,54 @@ async function runTesseract(pdfPath) {
 }
 
 export async function processDocument(document) {
+  const clampProgress = (value) => Math.min(100, Math.max(0, Math.round(value)));
+
   updateDocument(document.id, {
     status: "processing",
+    progress: 5,
+    stage: "Preparando",
     error: null,
   });
 
   try {
     let sourceText;
     if (isPdfDocument(document)) {
-      updateDocument(document.id, { status: "extracting" });
+      updateDocument(document.id, { status: "extracting", progress: 20, stage: "Extrayendo PDF" });
       sourceText = await extractPdfText(document.path);
     } else if (isDocxDocument(document)) {
-      updateDocument(document.id, { status: "extracting" });
+      updateDocument(document.id, { status: "extracting", progress: 20, stage: "Extrayendo Word" });
       sourceText = await extractDocxText(document.path);
     } else if (isDocDocument(document)) {
-      updateDocument(document.id, { status: "extracting" });
+      updateDocument(document.id, { status: "extracting", progress: 20, stage: "Extrayendo Word" });
       sourceText = await extractDocText(document.path);
     } else if (isXlsxDocument(document) || isCsvDocument(document)) {
-      updateDocument(document.id, { status: "extracting" });
-      sourceText = await extractSpreadsheetText(document.path, document);
+      updateDocument(document.id, { status: "extracting", progress: 20, stage: "Extrayendo hoja" });
+      sourceText = await extractSpreadsheetText(document.path, document, (current, total) => {
+        const pct = total > 0 ? 20 + (current / total) * 25 : 30;
+        updateDocument(document.id, { progress: clampProgress(pct) });
+      });
     } else if (isHtmlDocument(document)) {
-      updateDocument(document.id, { status: "extracting" });
+      updateDocument(document.id, { status: "extracting", progress: 20, stage: "Extrayendo HTML" });
       sourceText = await extractHtmlText(document.path);
     } else {
       sourceText = await readPreview(document.path);
     }
+
+    updateDocument(document.id, { progress: 45, stage: "Procesando texto" });
     let usedOcr = false;
     if (isPdfDocument(document) && (!sourceText || sourceText.trim().length < 80)) {
       try {
-        const ocrResult = await runTesseract(document.path);
+        updateDocument(document.id, { progress: 60 });
+        updateDocument(document.id, { stage: "OCR" });
+        const ocrResult = await runTesseract(document.path, (current, total) => {
+          const pct = total > 0 ? 60 + (current / total) * 12 : 65;
+          updateDocument(document.id, { progress: clampProgress(pct) });
+        });
         if (ocrResult && ocrResult.trim()) {
           sourceText = ocrResult;
           usedOcr = true;
         }
+        updateDocument(document.id, { progress: 70 });
       } catch (ocrError) {
         console.error(`OCR Tesseract fallido para ${document.id}:`, ocrError);
       }
@@ -312,10 +343,31 @@ export async function processDocument(document) {
     const summary =
       buildSummary(limitedText, document) || document.manualSummary || "Sin texto legible";
 
+    // Extraer datos estructurados automáticamente (profesores, horarios, etc.)
+    if (limitedText) {
+      try {
+        updateDocument(document.id, { progress: 75, stage: "Extrayendo datos" });
+        const extractionResult = await extractAndUpdateDataFromDocument(limitedText, document.originalName);
+        if (extractionResult) {
+          const total = Object.values(extractionResult).reduce((a, b) => a + b, 0);
+          console.log(`[EXTRACTOR] ${total} registros extraídos y guardados automáticamente`);
+        }
+      } catch (extractError) {
+        console.error(`Extracción de datos fallida para ${document.id}:`, extractError.message);
+        // No bloqueamos el procesamiento si falla la extracción
+      }
+    }
+
     let chunks = [];
     if (limitedText) {
       try {
-        chunks = await embedChunks(chunkText(limitedText));
+        const textChunks = chunkText(limitedText);
+        updateDocument(document.id, { progress: 80, stage: "Indexando embeddings" });
+        chunks = await embedChunks(textChunks, (current, total) => {
+          const pct = total > 0 ? 80 + (current / total) * 18 : 90;
+          updateDocument(document.id, { progress: clampProgress(pct) });
+        });
+        updateDocument(document.id, { progress: 98, stage: "Finalizando" });
       } catch (embedError) {
         console.error(`Embeddings fallidos para ${document.id}:`, embedError);
       }
@@ -327,11 +379,15 @@ export async function processDocument(document) {
       chunks,
       usedOcr,
       status: "ready",
+      progress: 100,
+      stage: "Listo",
       processedAt: new Date().toISOString(),
     });
   } catch (error) {
     updateDocument(document.id, {
       status: "error",
+      progress: 100,
+      stage: "Error",
       error: error?.message || "Error desconocido",
     });
     console.error(`Procesamiento de documento ${document.id} fallido:`, error);
