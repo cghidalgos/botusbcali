@@ -14,7 +14,6 @@ import {
   getContextState,
   updatePrompt,
   updateAdditionalNotes,
-  updatePromptTemplate,
   contextReady,
 } from "./config/contextStore.js";
 import {
@@ -763,9 +762,6 @@ app.post("/api/config/context", (req, res) => {
   }
   if (typeof additionalNotes === "string") {
     updateAdditionalNotes(additionalNotes);
-  }
-  if (typeof promptTemplate === "string") {
-    updatePromptTemplate(promptTemplate);
   }
 
   res.json(getContextState());
