@@ -1,0 +1,10 @@
+# docker-compose override para desarrollo local
+# Uso: docker-compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
+services:
+  botusbcali:
+    build:
+      context: .
+      dockerfile: Dockerfile.local
+    environment:
+      - WEBHOOK_BASE=
+      # Variables heredadas de .env pero WEBHOOK_BASE se sobrescribe a vacío
