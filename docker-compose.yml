@@ -19,16 +19,3 @@ services:
       - ./data:/app/data
       - ./uploads:/app/uploads
     restart: unless-stopped
-  admin-ui:
-    image: node:20-slim
-    working_dir: /app/admin-ui
-    command: >
-      sh -c "npm install && npm run dev -- --host 0.0.0.0 --port 8090"
-    ports:
-      - "8090:8090"
-    environment:
-      - VITE_API_TARGET=http://botusbcali:3000
-    volumes:
-      - .:/app
-    depends_on:
-      - botusbcali
