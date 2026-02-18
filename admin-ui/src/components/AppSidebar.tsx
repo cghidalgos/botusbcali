@@ -1,4 +1,4 @@
-import { MessageSquare, FileText, Clock, Activity, Home, Brain, Users, Tags } from "lucide-react";
+import { MessageSquare, FileText, Clock, Activity, Home, Brain, Users, Tags, ClipboardList } from "lucide-react";
 import { NavLink } from "@/components/NavLink";
 import logoBot from "@/assets/logoBot.png";
 
@@ -18,6 +18,7 @@ const items = [
   { title: "Inicio", url: "/", icon: Home },
   { title: "Contexto", url: "/contexto", icon: MessageSquare },
   { title: "Documentos", url: "/documentos", icon: FileText },
+  { title: "Encuestas", url: "/surveys", icon: ClipboardList },
   { title: "Historial", url: "/historial", icon: Clock },
   { title: "Usuarios", url: "/usuarios", icon: Users },
   { title: "Categorías", url: "/categorias", icon: Tags },

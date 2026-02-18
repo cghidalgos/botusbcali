@@ -29,13 +29,19 @@ import { listTelegramUsers, upsertTelegramUser, usersReady, markTelegramUserBloc
 
 import { composeResponse } from "./openai.js";
 import { processDocument } from "./documentProcessor.js";
-import { getHistory, clearHistory } from "./config/historyStore.js";
+import { getHistory, clearHistory, getHistoryByChatId, clearHistoryForChatId } from "./config/historyStore.js";
 import { chunkText, embedChunks, embedChunkDescriptors } from "./embeddings.js";
 import { chunkByStructure, extractHtmlSectionsFromHtml } from "./structuredChunking.js";
 import { createTelegramService, classifyTelegramSendError } from "./services/telegramService.js";
 import { getLearningPatterns, addLearningPattern, updateLearningPattern, deleteLearningPattern, getLearningStats, learningReady } from "./config/learningStore.js";
 import { getCategories, addCategory, deleteCategory, updateCategory, getSuggestedCategories, getSuggestedCategoriesPending, approveSuggestedCategory, rejectSuggestedCategory, updateSuggestedCategory, categoriesReady } from "./config/categoriesStore.js";
 import { getCacheStats, recordCacheHit, recordCacheEntry, cacheReady } from "./config/cacheStore.js";
+import { getAllFAQs, getFAQsByCategory, getTopFAQs, updateFAQ, deleteFAQ, toggleFAQ, getFAQStats } from "./config/faqStore.js";
+import { getCategories as getFAQCategories } from "./config/categoryDetector.js";
+import { getEmbeddingCacheStats, cleanOldEmbeddings } from "./config/embeddingCache.js";
+import { getIndexStats, rebuildDocumentIndex, removeDocumentFromIndex } from "./config/documentVectorIndex.js";
+import { getAllSurveys, getSurveyById, createSurvey, updateSurvey, deleteSurvey, closeSurvey, markSurveyAsSent, getSurveyResponses, getSurveyStats, getQuizLeaderboard, surveysReady } from "./config/surveyStore.js";
+import { sendSurveyToUser, startSurvey, handleSurveyAnswer, handleMultipleChoiceToggle, showLeaderboard, handleTextAnswer } from "./services/surveyService.js";
 
 dotenv.config();
 
@@ -452,6 +458,113 @@ app.post("/webhook", async (req, res) => {
   }
 
   const update = req.body;
+  
+  // Manejar callback queries (botones de encuestas/quizzes)
+  if (update.callback_query) {
+    const callbackQuery = update.callback_query;
+    const data = callbackQuery.data;
+    const userId = callbackQuery.from.id;
+    const chatId = callbackQuery.message.chat.id;
+    const messageId = callbackQuery.message.message_id;
+    
+    try {
+      // Respuestas de encuestas/quizzes
+      if (data.startsWith("survey_")) {
+        console.log("[survey-callback] data:", data);
+        if (data.startsWith("survey_start_")) {
+          const surveyId = data.slice("survey_start_".length);
+          await telegram.answerCallbackQuery(callbackQuery.id, { text: "Iniciando..." });
+          await startSurvey(telegram, userId, chatId, surveyId, messageId);
+        } else if (data.startsWith("survey_later_")) {
+          await telegram.answerCallbackQuery(callbackQuery.id, { text: "Puedes responder cuando quieras" });
+        } else if (data.startsWith("survey_leaderboard_")) {
+          const surveyId = data.slice("survey_leaderboard_".length);
+          await telegram.answerCallbackQuery(callbackQuery.id);
+          await showLeaderboard(telegram, chatId, surveyId);
+        } else if (data.startsWith("survey_answer_")) {
+          // Format: survey_answer_{sessionId}_{questionIndex}_{answer}
+          // sessionId puede incluir '_' (ej: session_abcd1234), por eso usamos regex
+          const match = data.match(/^survey_answer_(.+)_(\d+)_(.+)$/);
+          if (!match) {
+            await telegram.answerCallbackQuery(callbackQuery.id, { text: "Respuesta inválida" });
+            return res.sendStatus(200);
+          }
+
+          const sessionId = match[1];
+          const questionIndex = Number.parseInt(match[2], 10);
+          const answer = match[3];
+          console.log("[survey-answer] sessionId:", sessionId, "questionIndex:", questionIndex, "answer:", answer);
+          const parsedAnswer = Number.isNaN(Number(answer)) ? answer : Number.parseInt(answer, 10);
+
+          await telegram.answerCallbackQuery(callbackQuery.id);
+          await handleSurveyAnswer(telegram, userId, chatId, sessionId, questionIndex, parsedAnswer);
+        } else if (data.startsWith("survey_toggle_")) {
+          // Format: survey_toggle_{sessionId}_{questionIndex}_{optionIndex}
+          const match = data.match(/^survey_toggle_(.+)_(\d+)_(\d+)$/);
+          if (!match) {
+            await telegram.answerCallbackQuery(callbackQuery.id, { text: "Selección inválida" });
+            return res.sendStatus(200);
+          }
+
+          const sessionId = match[1];
+          const questionIndex = Number.parseInt(match[2], 10);
+          const optionIndex = Number.parseInt(match[3], 10);
+          console.log("[survey-toggle] sessionId:", sessionId, "questionIndex:", questionIndex, "optionIndex:", optionIndex);
+
+          await telegram.answerCallbackQuery(callbackQuery.id);
+          await handleMultipleChoiceToggle(telegram, userId, chatId, sessionId, questionIndex, optionIndex, messageId);
+        } else if (data.startsWith("survey_confirm_")) {
+          // Format: survey_confirm_{sessionId}_{questionIndex}
+          const match = data.match(/^survey_confirm_(.+)_(\d+)$/);
+          if (!match) {
+            await telegram.answerCallbackQuery(callbackQuery.id, { text: "Confirmación inválida" });
+            return res.sendStatus(200);
+          }
+
+          const sessionId = match[1];
+          const questionIndex = Number.parseInt(match[2], 10);
+          console.log("[survey-confirm] sessionId:", sessionId, "questionIndex:", questionIndex);
+
+          // Obtener las respuestas seleccionadas de la sesión
+          const { getSession } = await import("./config/surveyStore.js");
+          const session = getSession(sessionId);
+          const answers = session?.answers?.[questionIndex] || [];
+
+          await telegram.answerCallbackQuery(callbackQuery.id, { text: "Respuesta guardada" });
+          await handleSurveyAnswer(telegram, userId, chatId, sessionId, questionIndex, answers);
+        } else if (data.startsWith("survey_skip_")) {
+          // Format: survey_skip_{sessionId}_{questionIndex}
+          const match = data.match(/^survey_skip_(.+)_(\d+)$/);
+          if (!match) {
+            await telegram.answerCallbackQuery(callbackQuery.id, { text: "Acción inválida" });
+            return res.sendStatus(200);
+          }
+
+          const sessionId = match[1];
+          const questionIndex = Number.parseInt(match[2], 10);
+          console.log("[survey-skip] sessionId:", sessionId, "questionIndex:", questionIndex);
+
+          await telegram.answerCallbackQuery(callbackQuery.id, { text: "Pregunta omitida" });
+          await handleSurveyAnswer(telegram, userId, chatId, sessionId, questionIndex, null);
+        }
+        
+        return res.sendStatus(200);
+      }
+      
+      await telegram.answerCallbackQuery(callbackQuery.id);
+      return res.sendStatus(200);
+    } catch (error) {
+      console.error("Callback query error", error);
+      try {
+        await telegram.answerCallbackQuery(callbackQuery.id, { text: "Error al procesar" });
+      } catch (e) {
+        // Ignorar
+      }
+      return res.sendStatus(200);
+    }
+  }
+  
+  // Manejar mensajes de texto
   const message = update.message ?? update.edited_message;
   const text = message?.text?.trim();
 
@@ -462,6 +575,15 @@ app.post("/webhook", async (req, res) => {
   try {
     // Persist user info (only users who wrote to the bot are stored).
     upsertTelegramUser(getTelegramUserInfo(message));
+    
+    const userId = message.from.id;
+    const chatId = message.chat.id;
+    
+    // Verificar si el usuario está respondiendo una pregunta de texto de encuesta
+    const handledBySurvey = await handleTextAnswer(telegram, userId, chatId, text);
+    if (handledBySurvey) {
+      return res.sendStatus(200);
+    }
 
     const ingestStatus = await waitForRecentIngestion();
     const baseContext = getContextState();
@@ -599,11 +721,12 @@ app.post("/send-broadcast", broadcastUpload.single("media"), async (req, res) =>
     });
   }
 
+  // Verificar secreto de broadcast si está configurado
   const secret = process.env.BROADCAST_SECRET;
   if (secret) {
     const provided = req.header("x-broadcast-secret") || "";
     if (provided !== secret) {
-      return res.status(401).json({ error: "No autorizado." });
+      return res.status(401).json({ error: "No autorizado. Secreto de broadcast inválido." });
     }
   }
 
@@ -1108,6 +1231,16 @@ app.delete("/api/documents/:id", async (req, res) => {
   } catch (error) {
     console.error("No se pudo eliminar archivo", error);
   }
+  
+  // Eliminar del índice de vectores si está habilitado
+  if (process.env.USE_VECTOR_INDEX === 'true') {
+    try {
+      removeDocumentFromIndex(id);
+      console.log(`✓ Documento ${id} eliminado del índice de vectores`);
+    } catch (indexError) {
+      console.error(`Error eliminando documento ${id} del índice:`, indexError);
+    }
+  }
 
   res.json(listDocumentsForClient());
 });
@@ -1159,13 +1292,14 @@ app.get("/api/profiles/stats", (req, res) => {
 
 // API: User history
 app.get("/api/users/:userId/history", (req, res) => {
-  // This would require enhanced history tracking per user
-  // For now, return empty array or integrate with document history
-  res.json([]);
+  const { userId } = req.params;
+  const history = getHistoryByChatId(userId);
+  res.json(history);
 });
 
 app.post("/api/users/:userId/history/clear", (req, res) => {
-  // Clear user-specific history if tracked
+  const { userId } = req.params;
+  clearHistoryForChatId(userId);
   res.json({ ok: true });
 });
 
@@ -1199,7 +1333,152 @@ app.post("/api/users/:userId/block", (req, res) => {
   }
 });
 
+// ============================================================================
+// API: FAQ Cache - Sistema de preguntas frecuentes con caché inteligente
+// ============================================================================
+
+// Obtener todas las FAQs
+app.get("/api/faqs", (req, res) => {
+  try {
+    const faqs = getAllFAQs();
+    res.json(faqs);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Obtener estadísticas del FAQ cache
+app.get("/api/faqs/stats", (req, res) => {
+  try {
+    const stats = getFAQStats();
+    res.json(stats);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Obtener FAQs más populares
+app.get("/api/faqs/top", (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 10;
+    const topFAQs = getTopFAQs(limit);
+    res.json(topFAQs);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Obtener FAQs por categoría
+app.get("/api/faqs/category/:category", (req, res) => {
+  try {
+    const { category } = req.params;
+    const faqs = getFAQsByCategory(category);
+    res.json(faqs);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Actualizar una FAQ
+app.put("/api/faqs/:id", (req, res) => {
+  try {
+    const { id } = req.params;
+    const updates = req.body;
+    const updated = updateFAQ(id, updates);
+    if (!updated) {
+      return res.status(404).json({ error: "FAQ no encontrada" });
+    }
+    res.json(updated);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Eliminar una FAQ
+app.delete("/api/faqs/:id", (req, res) => {
+  try {
+    const { id } = req.params;
+    const deleted = deleteFAQ(id);
+    if (!deleted) {
+      return res.status(404).json({ error: "FAQ no encontrada" });
+    }
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Habilitar/deshabilitar una FAQ
+app.patch("/api/faqs/:id/toggle", (req, res) => {
+  try {
+    const { id } = req.params;
+    const { enabled } = req.body;
+    const updated = toggleFAQ(id, enabled);
+    if (!updated) {
+      return res.status(404).json({ error: "FAQ no encontrada" });
+    }
+    res.json(updated);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Obtener lista de categorías de FAQ
+app.get("/api/faq-categories", (req, res) => {
+  try {
+    const categories = getFAQCategories();
+    res.json(categories);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Obtener estadísticas del embedding cache
+app.get("/api/embedding-cache/stats", (req, res) => {
+  try {
+    const stats = getEmbeddingCacheStats();
+    res.json(stats);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Limpiar embeddings antiguos no usados
+app.post("/api/embedding-cache/clean", (req, res) => {
+  try {
+    const { maxAgeDays = 90 } = req.body;
+    const maxAgeMs = maxAgeDays * 24 * 60 * 60 * 1000;
+    const result = cleanOldEmbeddings(maxAgeMs);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Obtener estadísticas del índice de vectores
+app.get("/api/vector-index/stats", (req, res) => {
+  try {
+    const stats = getIndexStats();
+    res.json(stats);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Reconstruir índice de vectores
+app.post("/api/vector-index/rebuild", async (req, res) => {
+  try {
+    rebuildDocumentIndex();
+    res.json({ success: true, message: "Índice reconstruido exitosamente" });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================================================
 // API: Categories
+// ============================================================================
+
 app.get("/api/categories", (req, res) => {
   const categories = getCategories();
   res.json({
@@ -1274,6 +1553,325 @@ app.put("/api/suggested-categories/:id", (req, res) => {
     });
   } catch (error) {
     res.status(404).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+// ====== SURVEYS & QUIZZES ======
+
+// Crear nueva encuesta o quiz
+app.post("/api/surveys", (req, res) => {
+  try {
+    const survey = createSurvey(req.body);
+    res.json({
+      ok: true,
+      survey,
+    });
+  } catch (error) {
+    res.status(400).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+// Listar todas las encuestas/quizzes
+app.get("/api/surveys", (req, res) => {
+  try {
+    const filters = {};
+    if (req.query.type) filters.type = req.query.type;
+    if (req.query.status) filters.status = req.query.status;
+    
+    const surveys = getAllSurveys(filters);
+    res.json({
+      ok: true,
+      surveys,
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+// Obtener una encuesta específica
+app.get("/api/surveys/:id", (req, res) => {
+  try {
+    const survey = getSurveyById(req.params.id);
+    if (!survey) {
+      return res.status(404).json({
+        ok: false,
+        error: "Encuesta no encontrada",
+      });
+    }
+    res.json({
+      ok: true,
+      survey,
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+// Actualizar encuesta
+app.put("/api/surveys/:id", (req, res) => {
+  try {
+    const survey = updateSurvey(req.params.id, req.body);
+    if (!survey) {
+      return res.status(404).json({
+        ok: false,
+        error: "Encuesta no encontrada",
+      });
+    }
+    res.json({
+      ok: true,
+      survey,
+    });
+  } catch (error) {
+    res.status(400).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+// Eliminar encuesta
+app.delete("/api/surveys/:id", (req, res) => {
+  try {
+    const deleted = deleteSurvey(req.params.id);
+    if (!deleted) {
+      return res.status(404).json({
+        ok: false,
+        error: "Encuesta no encontrada",
+      });
+    }
+    res.json({
+      ok: true,
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+// Enviar encuesta a usuarios
+app.post("/api/surveys/:id/send", async (req, res) => {
+  if (!process.env.TELEGRAM_BOT_TOKEN) {
+    return telegramNotConfigured(res);
+  }
+  
+  try {
+    const survey = getSurveyById(req.params.id);
+    if (!survey) {
+      return res.status(404).json({
+        ok: false,
+        error: "Encuesta no encontrada",
+      });
+    }
+    
+    const telegram = createTelegramService(process.env.TELEGRAM_BOT_TOKEN);
+    const { userIds, sendToAll } = req.body;
+    
+    let targetUsers = [];
+    
+    if (sendToAll) {
+      // Enviar a todos los usuarios
+      targetUsers = listTelegramUsers().map(u => u.chatId);
+    } else if (userIds && Array.isArray(userIds)) {
+      targetUsers = userIds;
+    } else {
+      return res.status(400).json({
+        ok: false,
+        error: "Debe especificar userIds o sendToAll",
+      });
+    }
+    
+    // Enviar a cada usuario
+    const results = {
+      sent: 0,
+      failed: 0,
+      errors: [],
+    };
+    
+    for (const userId of targetUsers) {
+      try {
+        await sendSurveyToUser(telegram, userId, survey.id);
+        results.sent++;
+      } catch (error) {
+        results.failed++;
+        results.errors.push({ userId, error: error.message });
+      }
+    }
+    
+    // Actualizar contador de envíos
+    markSurveyAsSent(survey.id, targetUsers);
+    
+    res.json({
+      ok: true,
+      results,
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+// Cerrar encuesta
+app.post("/api/surveys/:id/close", (req, res) => {
+  try {
+    const survey = closeSurvey(req.params.id);
+    if (!survey) {
+      return res.status(404).json({
+        ok: false,
+        error: "Encuesta no encontrada",
+      });
+    }
+    res.json({
+      ok: true,
+      survey,
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+// Obtener respuestas de una encuesta
+app.get("/api/surveys/:id/responses", (req, res) => {
+  try {
+    const filters = {};
+    if (req.query.userId) filters.userId = parseInt(req.query.userId);
+    
+    const responses = getSurveyResponses(req.params.id, filters);
+    res.json({
+      ok: true,
+      responses,
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+// Obtener estadísticas de una encuesta
+app.get("/api/surveys/:id/stats", (req, res) => {
+  try {
+    const stats = getSurveyStats(req.params.id);
+    if (!stats) {
+      return res.status(404).json({
+        ok: false,
+        error: "Encuesta no encontrada",
+      });
+    }
+    res.json({
+      ok: true,
+      stats,
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+// Obtener leaderboard de un quiz
+app.get("/api/surveys/:id/leaderboard", (req, res) => {
+  try {
+    const limit = req.query.limit ? parseInt(req.query.limit) : 10;
+    const leaderboard = getQuizLeaderboard(req.params.id, limit);
+    res.json({
+      ok: true,
+      leaderboard,
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      error: error.message,
+    });
+  }
+});
+
+// Exportar respuestas a CSV
+app.get("/api/surveys/:id/export", (req, res) => {
+  try {
+    const survey = getSurveyById(req.params.id);
+    if (!survey) {
+      return res.status(404).json({
+        ok: false,
+        error: "Encuesta no encontrada",
+      });
+    }
+    
+    const responses = getSurveyResponses(req.params.id);
+    
+    // Generar CSV
+    let csv = "";
+    
+    // Headers
+    const headers = ["ID Respuesta", "Usuario ID", "Username", "Fecha"];
+    if (survey.type === "quiz") {
+      headers.push("Puntaje", "Porcentaje", "Aprobado", "Intento", "Tiempo");
+    }
+    survey.questions.forEach((q, idx) => {
+      headers.push(`P${idx + 1}: ${q.question}`);
+    });
+    csv += headers.join(",") + "\n";
+    
+    // Rows
+    responses.forEach((response) => {
+      const row = [
+        response.id,
+        response.userId,
+        response.username || "",
+        response.completedAt,
+      ];
+      
+      if (survey.type === "quiz") {
+        row.push(
+          response.score,
+          response.percentage.toFixed(2),
+          response.passed ? "Sí" : "No",
+          response.attemptNumber,
+          response.timeSpent
+        );
+      }
+      
+      survey.questions.forEach((q) => {
+        const answer = response.answers.find((a) => a.questionId === q.id);
+        if (!answer) {
+          row.push("");
+        } else if (Array.isArray(answer.answer)) {
+          row.push(answer.answer.map((idx) => q.options[idx]).join("; "));
+        } else if (typeof answer.answer === "number" && q.options) {
+          row.push(q.options[answer.answer] || answer.answer);
+        } else {
+          row.push(String(answer.answer).replace(/,/g, ";"));
+        }
+      });
+      
+      csv += row.map((cell) => `"${cell}"`).join(",") + "\n";
+    });
+    
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader("Content-Disposition", `attachment; filename="${survey.title.replace(/\s+/g, "_")}_${Date.now()}.csv"`);
+    res.send(csv);
+  } catch (error) {
+    res.status(500).json({
       ok: false,
       error: error.message,
     });

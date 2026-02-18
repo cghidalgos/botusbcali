@@ -13,7 +13,12 @@ function escapeHtml(text) {
     .replace(/>/g, "&gt;");
 }
 
-function formatTelegramHtml(text) {
+function formatTelegramHtml(text, skipEscape = false) {
+  // Si skipEscape es true, el texto ya tiene HTML válido
+  if (skipEscape) {
+    return text;
+  }
+  
   const escaped = escapeHtml(text);
   return escaped
     .replace(/^#{1,6}\s*(.+)$/gm, "<b>$1</b>")
@@ -71,11 +76,18 @@ export function createTelegramService({ token, delayBetweenPartsMs = 0, maxMessa
   const apiBase = resolvedToken ? `https://api.telegram.org/bot${resolvedToken}` : null;
 
   if (!apiBase) {
+    const mockError = () => {
+      throw new Error("Telegram API not configured (missing TELEGRAM_BOT_TOKEN)");
+    };
     return {
       isConfigured: false,
-      async sendMessage() {
-        throw new Error("Telegram API not configured (missing TELEGRAM_BOT_TOKEN)");
-      },
+      sendMessage: mockError,
+      sendPhoto: mockError,
+      sendVideo: mockError,
+      sendAudio: mockError,
+      sendDocument: mockError,
+      answerCallbackQuery: mockError,
+      editMessageReplyMarkup: mockError,
     };
   }
 
@@ -100,17 +112,28 @@ export function createTelegramService({ token, delayBetweenPartsMs = 0, maxMessa
   }
 
   async function sendMessage(chatId, text, options = {}) {
-    const parts = splitTelegramMessage(text, options.maxLength || maxMessageLength);
+    const { maxLength, maxRetries, parseMode, ...telegramOptions } = options;
+    
+    // Detectar si el texto ya contiene HTML válido
+    const hasHtml = text && (text.includes('<b>') || text.includes('</b>') ||
+                    text.includes('<i>') || text.includes('</i>') || 
+                    text.includes('<code>') || text.includes('</code>') ||
+                    text.includes('<a ') || text.includes('<pre>') || 
+                    text.includes('<u>') || text.includes('</u>'));
+    
+    const parts = splitTelegramMessage(text, maxLength || maxMessageLength);
+    
     for (const part of parts) {
       await postWithRetry(
         "sendMessage",
         {
           chat_id: chatId,
-          text: formatTelegramHtml(part),
-          parse_mode: "HTML",
+          text: hasHtml ? part : formatTelegramHtml(part, false),
+          parse_mode: parseMode || "HTML",
+          ...telegramOptions,
         },
         {},
-        { maxRetries: options.maxRetries ?? 2 }
+        { maxRetries: maxRetries ?? 2 }
       );
       if (delayBetweenPartsMs > 0) {
         await sleep(delayBetweenPartsMs);
@@ -121,8 +144,12 @@ export function createTelegramService({ token, delayBetweenPartsMs = 0, maxMessa
   function buildMediaCaption(caption) {
     const trimmed = typeof caption === "string" ? caption.trim() : "";
     if (!trimmed) return null;
+    
+    const hasHtml = trimmed.includes('<b>') || trimmed.includes('<i>') || 
+                    trimmed.includes('<code>') || trimmed.includes('<a ');
+    
     return {
-      caption: formatTelegramHtml(trimmed),
+      caption: formatTelegramHtml(trimmed, hasHtml),
       parse_mode: "HTML",
     };
   }
@@ -213,6 +240,30 @@ export function createTelegramService({ token, delayBetweenPartsMs = 0, maxMessa
     }
     await sendMediaByRef("sendDocument", "document", chatId, input, options);
   }
+preguntas
+  async function answerCallbackQuery(callbackQueryId, options = {}) {
+    await postWithRetry(
+      "answerCallbackQuery",
+      {
+        callback_query_id: callbackQueryId,
+        ...options,
+      },
+      {},
+      { maxRetries: 1 }
+    );
+  }
+
+  async function editMessageReplyMarkup(replyMarkup, options = {}) {
+    await postWithRetry(
+      "editMessageReplyMarkup",
+      {
+        reply_markup: replyMarkup,
+        ...options,
+      },
+      {},
+      { maxRetries: 1 }
+    );
+  }
 
   return {
     isConfigured: true,
@@ -221,5 +272,7 @@ export function createTelegramService({ token, delayBetweenPartsMs = 0, maxMessa
     sendVideo,
     sendAudio,
     sendDocument,
+    answerCallbackQuery,
+    editMessageReplyMarkup,
   };
 }

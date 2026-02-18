@@ -4,6 +4,9 @@ import OpenAI from "openai";
 import { addHistoryEntry } from "./config/historyStore.js";
 import { getMemory, setMemory } from "./config/memoryStore.js";
 import { getEmbedding } from "./embeddings.js";
+import { findSimilarFAQ, upsertFAQ, incrementFAQHit } from "./config/faqStore.js";
+import { detectCategory } from "./config/categoryDetector.js";
+import { searchSimilarChunks } from "./config/documentVectorIndex.js";
 
 dotenv.config();
 
@@ -360,6 +363,35 @@ export async function composeResponse({ incomingText, context, documents, chatId
   if (/(\bgracias\b|\bperfecto\b|\blo hiciste bien\b|\bexcelente\b|\bmuy bien\b)/i.test(rawQuestion)) {
     return "Con todo el gusto.";
   }
+
+  // Sistema de caché FAQ: buscar respuestas similares cacheadas
+  try {
+    const questionEmbedding = await getEmbedding(rawQuestion);
+    if (questionEmbedding) {
+      const similarFAQ = findSimilarFAQ(questionEmbedding, 0.85);
+      if (similarFAQ) {
+        console.log(`✓ FAQ Cache HIT (${(similarFAQ.similarity * 100).toFixed(1)}% similitud): "${rawQuestion}" → usando respuesta cacheada`);
+        incrementFAQHit(similarFAQ.id);
+        
+        // Guardar en historial con indicador de caché
+        addHistoryEntry({
+          question: incomingText,
+          answer: similarFAQ.answer,
+          context,
+          usedDocuments: [],
+          chatId,
+          fromCache: true,
+          cacheHitId: similarFAQ.id,
+        });
+        
+        return similarFAQ.answer;
+      }
+    }
+  } catch (cacheError) {
+    console.error("Error en FAQ cache lookup:", cacheError);
+    // Continuar con flujo normal si falla el caché
+  }
+
   const memory = chatId ? getMemory(chatId) : "";
   const stopTokens = new Set([
     "quien",
@@ -663,22 +695,54 @@ export async function composeResponse({ incomingText, context, documents, chatId
   } catch (embedError) {
     console.error("Embeddings de consulta fallidos", embedError);
   }
+  
   if (queryEmbedding) {
-    const scored = [];
-    for (const doc of sortedDocuments) {
-      const chunks = Array.isArray(doc.chunks) ? doc.chunks : [];
-      for (const chunk of chunks) {
-        if (!chunk?.embedding || !Array.isArray(chunk.embedding)) continue;
-        const score = cosineSimilarity(queryEmbedding, chunk.embedding);
-        scored.push({ score, text: chunk.text, doc });
+    // Si está habilitado el índice de vectores, usar búsqueda optimizada
+    if (process.env.USE_VECTOR_INDEX === 'true') {
+      try {
+        const indexResults = searchSimilarChunks(queryEmbedding, 20, { ef: 100 });
+        indexResults.forEach((item) => {
+          if (item.text) {
+            semanticSnippets.push(item.text);
+          }
+        });
+      } catch (indexError) {
+        console.error("Error en búsqueda con índice, fallback a búsqueda lineal:", indexError);
+        // Fallback a búsqueda lineal
+        const scored = [];
+        for (const doc of sortedDocuments) {
+          const chunks = Array.isArray(doc.chunks) ? doc.chunks : [];
+          for (const chunk of chunks) {
+            if (!chunk?.embedding || !Array.isArray(chunk.embedding)) continue;
+            const score = cosineSimilarity(queryEmbedding, chunk.embedding);
+            scored.push({ score, text: chunk.text, doc });
+          }
+        }
+        scored.sort((a, b) => b.score - a.score);
+        scored.slice(0, 20).forEach((item) => {
+          if (item.text) {
+            semanticSnippets.push(item.text);
+          }
+        });
       }
+    } else {
+      // Búsqueda lineal tradicional (para compatibilidad o cuando el índice está deshabilitado)
+      const scored = [];
+      for (const doc of sortedDocuments) {
+        const chunks = Array.isArray(doc.chunks) ? doc.chunks : [];
+        for (const chunk of chunks) {
+          if (!chunk?.embedding || !Array.isArray(chunk.embedding)) continue;
+          const score = cosineSimilarity(queryEmbedding, chunk.embedding);
+          scored.push({ score, text: chunk.text, doc });
+        }
+      }
+      scored.sort((a, b) => b.score - a.score);
+      scored.slice(0, 20).forEach((item) => {
+        if (item.text) {
+          semanticSnippets.push(item.text);
+        }
+      });
     }
-    scored.sort((a, b) => b.score - a.score);
-    scored.slice(0, 8).forEach((item) => {
-      if (item.text) {
-        semanticSnippets.push(item.text);
-      }
-    });
   }
   if (targetTerms.length) {
     for (const doc of sortedDocuments) {
@@ -703,19 +767,19 @@ export async function composeResponse({ incomingText, context, documents, chatId
         }
       }
       if (matches.length) {
-        matches.slice(0, 6).forEach((match) => {
+        matches.slice(0, 15).forEach((match) => {
           if (match && match.length <= 500) {
             relevantSnippets.push(match);
           }
         });
       }
-      if (relevantSnippets.length >= 8) {
+      if (relevantSnippets.length >= 20) {
         break;
       }
     }
   }
 
-  const finalSnippets = (semanticSnippets.length ? semanticSnippets : relevantSnippets).slice(0, 4);
+  const finalSnippets = (semanticSnippets.length ? semanticSnippets : relevantSnippets).slice(0, 12);
 
   if (isTeachingQuery && targetTerms.length) {
     const scheduleEntries = [];
@@ -1026,6 +1090,29 @@ export async function composeResponse({ incomingText, context, documents, chatId
     usedDocuments: documents.map(d => d.originalName),
     chatId,
   });
+
+  // Guardar en FAQ cache para preguntas futuras similares
+  try {
+    const questionEmbedding = await getEmbedding(rawQuestion);
+    if (questionEmbedding && answer && answer.length > 10) {
+      const category = detectCategory(rawQuestion);
+      upsertFAQ({
+        question: rawQuestion,
+        answer,
+        questionEmbedding,
+        category,
+        metadata: {
+          chatId,
+          documentsUsed: documents.map(d => d.originalName),
+          createdFrom: 'telegram',
+        },
+      });
+      console.log(`✓ FAQ Cache SAVED: "${rawQuestion}" → categoría: ${category}`);
+    }
+  } catch (cacheError) {
+    console.error("Error guardando en FAQ cache:", cacheError);
+    // No fallar si el caché falla
+  }
 
   return answer;
 }

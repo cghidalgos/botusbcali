@@ -8,11 +8,8 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
   const apiTarget = env.VITE_API_TARGET || "http://localhost:3000";
 
-  // Base URL para assets y routing
-  // Usar VITE_BASE_URL del archivo .env si existe, sino calcular según modo
-  // .env.local (desarrollo directo): VITE_BASE_URL=/
-  // .env.production (producción con Nginx): VITE_BASE_URL=/botusbcali/
-  const base = env.VITE_BASE_URL || (mode === "production" ? "/botusbcali/" : "/admin/");
+  // Usar rutas relativas para que funcione tanto en / como en /botusbcali/
+  const base = "./";
 
   return {
     base,

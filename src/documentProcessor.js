@@ -10,6 +10,7 @@ import ExcelJS from "exceljs";
 import { load } from "cheerio";
 import { chunkText, embedChunks, embedChunkDescriptors } from "./embeddings.js";
 import { chunkByStructure, extractHtmlSectionsFromHtml } from "./structuredChunking.js";
+import { indexDocumentChunks } from "./config/documentVectorIndex.js";
 
 const PREVIEW_BYTES = 8192;
 const PDF_MIME_TYPES = new Set(["application/pdf"]);
@@ -380,6 +381,16 @@ export async function processDocument(document) {
       status: "ready",
       processedAt: new Date().toISOString(),
     });
+    
+    // Indexar chunks en el índice de vectores si está habilitado
+    if (process.env.USE_VECTOR_INDEX === 'true' && chunks && chunks.length > 0) {
+      try {
+        const indexed = indexDocumentChunks(document.id, chunks);
+        console.log(`✓ Documento ${document.id}: ${indexed} chunks indexados`);
+      } catch (indexError) {
+        console.error(`Error indexando documento ${document.id}:`, indexError);
+      }
+    }
   } catch (error) {
     updateDocument(document.id, {
       status: "error",

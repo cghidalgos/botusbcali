@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Users, MessageSquare, Trash2, Lock, LockOpen, Send, RefreshCcw } from "lucide-react";
+import { Users, MessageSquare, Trash2, Lock, LockOpen, Send, RefreshCcw, Mail, CheckSquare, Square } from "lucide-react";
 import {
   blockUser,
   clearUserHistory,
@@ -13,6 +13,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
+import BroadcastModal from "@/components/BroadcastModal";
 
 const UsersPanel = () => {
   const [users, setUsers] = useState<UserProfile[]>([]);
@@ -23,6 +24,11 @@ const UsersPanel = () => {
   const [error, setError] = useState<string | null>(null);
   const [messageText, setMessageText] = useState("");
   const [sendingMessage, setSendingMessage] = useState(false);
+
+  // Broadcast state
+  const [selectedUserIds, setSelectedUserIds] = useState<Set<string>>(new Set());
+  const [broadcastModalOpen, setBroadcastModalOpen] = useState(false);
+  const [sendToAll, setSendToAll] = useState(false);
 
   const loadUsers = async () => {
     try {
@@ -95,65 +101,159 @@ const UsersPanel = () => {
     }
   };
 
+  const handleToggleUser = (chatId: string) => {
+    setSelectedUserIds((prev) => {
+      const newSet = new Set(prev);
+      if (newSet.has(chatId)) {
+        newSet.delete(chatId);
+      } else {
+        newSet.add(chatId);
+      }
+      return newSet;
+    });
+  };
+
+  const handleSelectAll = () => {
+    if (selectedUserIds.size === users.filter(u => !u.isBlocked).length) {
+      setSelectedUserIds(new Set());
+    } else {
+      setSelectedUserIds(new Set(users.filter(u => !u.isBlocked).map((u) => String(u.chatId))));
+    }
+  };
+
+  const handleOpenBroadcast = (all: boolean) => {
+    setSendToAll(all);
+    setBroadcastModalOpen(true);
+  };
+
+  const selectedUsersForBroadcast = users.filter((u) => selectedUserIds.has(String(u.chatId)));
+
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-      {/* Users List */}
-      <div className="lg:col-span-1 panel">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="panel-title mb-0">
-            <Users className="w-5 h-5 text-primary" />
-            Usuarios
-          </h2>
-          <button type="button" className="btn-secondary" onClick={loadUsers}>
-            <RefreshCcw className="w-4 h-4" />
-          </button>
-        </div>
-
-        {error && <p className="text-sm text-red-500 mb-4">{error}</p>}
-        {loading && <p className="text-sm text-muted-foreground">Cargando usuarios...</p>}
-
-        {!loading && users.length === 0 && (
-          <p className="text-sm text-muted-foreground">No hay usuarios aún.</p>
-        )}
-
-        {!loading && users.length > 0 && (
-          <div className="space-y-2 max-h-96 overflow-y-auto">
-            {users.map((user) => {
-              const displayName = user.firstName && user.lastName 
-                ? `${user.firstName} ${user.lastName}`.trim()
-                : user.firstName || user.username || `Usuario ${user.chatId}`;
-              
-              return (
-                <button
-                  key={user.chatId}
-                  type="button"
-                  onClick={() => handleSelectUser(String(user.chatId))}
-                  className={`w-full text-left p-3 rounded-lg border transition-colors ${
-                    selectedUserId === String(user.chatId)
-                      ? "border-primary bg-primary/10"
-                      : "border-border hover:bg-muted"
-                  }`}
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0 flex-1">
-                      <p className="text-sm font-semibold text-foreground truncate">
-                        {displayName}
-                      </p>
-                      <p className="text-xs text-muted-foreground truncate">ID: {user.chatId}</p>
-                      {user.username && (
-                        <p className="text-xs text-muted-foreground truncate">@{user.username}</p>
-                      )}
-                    </div>
-                    {user.isBlocked && (
-                      <Lock className="w-4 h-4 text-destructive shrink-0 mt-1" />
-                    )}
-                  </div>
-                </button>
-              );
-            })}
+    <>
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Users List */}
+        <div className="lg:col-span-1 panel">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="panel-title mb-0">
+              <Users className="w-5 h-5 text-primary" />
+              Usuarios
+            </h2>
+            <button type="button" className="btn-secondary" onClick={loadUsers}>
+              <RefreshCcw className="w-4 h-4" />
+            </button>
           </div>
-        )}
-      </div>
+
+          {/* Botones de difusión */}
+          <div className="mb-4 space-y-2">
+            <Button
+              onClick={handleSelectAll}
+              variant="outline"
+              size="sm"
+              className="w-full"
+              disabled={users.filter(u => !u.isBlocked).length === 0}
+            >
+              {selectedUserIds.size === users.filter(u => !u.isBlocked).length ? (
+                <>
+                  <Square className="w-4 h-4 mr-2" />
+                  Deseleccionar todos
+                </>
+              ) : (
+                <>
+                  <CheckSquare className="w-4 h-4 mr-2" />
+                  Seleccionar todos ({users.filter(u => !u.isBlocked).length})
+                </>
+              )}
+            </Button>
+            
+            <div className="flex gap-2">
+              <Button
+                onClick={() => handleOpenBroadcast(false)}
+                size="sm"
+                className="flex-1"
+                disabled={selectedUserIds.size === 0}
+              >
+                <Mail className="w-4 h-4 mr-2" />
+                Enviar a {selectedUserIds.size}
+              </Button>
+              
+              <Button
+                onClick={() => handleOpenBroadcast(true)}
+                size="sm"
+                variant="secondary"
+                className="flex-1"
+                disabled={users.filter(u => !u.isBlocked).length === 0}
+              >
+                <Mail className="w-4 h-4 mr-2" />
+                Enviar a todos
+              </Button>
+            </div>
+          </div>
+
+          {error && <p className="text-sm text-red-500 mb-4">{error}</p>}
+          {loading && <p className="text-sm text-muted-foreground">Cargando usuarios...</p>}
+
+          {!loading && users.length === 0 && (
+            <p className="text-sm text-muted-foreground">No hay usuarios aún.</p>
+          )}
+
+          {!loading && users.length > 0 && (
+            <div className="space-y-2 max-h-96 overflow-y-auto">
+              {users.map((user) => {
+                const displayName = user.firstName && user.lastName 
+                  ? `${user.firstName} ${user.lastName}`.trim()
+                  : user.firstName || user.username || `Usuario ${user.chatId}`;
+                const isSelected = selectedUserIds.has(String(user.chatId));
+                
+                return (
+                  <div
+                    key={user.chatId}
+                    className={`flex items-center gap-2 p-3 rounded-lg border transition-colors ${
+                      selectedUserId === String(user.chatId)
+                        ? "border-primary bg-primary/10"
+                        : "border-border hover:bg-muted"
+                    } ${user.isBlocked ? "opacity-60" : ""}`}
+                  >
+                    {/* Checkbox */}
+                    <button
+                      type="button"
+                      onClick={() => handleToggleUser(String(user.chatId))}
+                      className="shrink-0"
+                      disabled={user.isBlocked}
+                    >
+                      {isSelected ? (
+                        <CheckSquare className="w-5 h-5 text-primary" />
+                      ) : (
+                        <Square className="w-5 h-5 text-muted-foreground" />
+                      )}
+                    </button>
+                    
+                    {/* User info */}
+                    <button
+                      type="button"
+                      onClick={() => handleSelectUser(String(user.chatId))}
+                      className="flex-1 text-left"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-semibold text-foreground truncate">
+                            {displayName}
+                          </p>
+                          <p className="text-xs text-muted-foreground truncate">ID: {user.chatId}</p>
+                          {user.username && (
+                            <p className="text-xs text-muted-foreground truncate">@{user.username}</p>
+                          )}
+                        </div>
+                        {user.isBlocked && (
+                          <Lock className="w-4 h-4 text-destructive shrink-0 mt-1" />
+                        )}
+                      </div>
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
 
       {/* Selected User Details & History */}
       <div className="lg:col-span-2 space-y-6">
@@ -325,6 +425,15 @@ const UsersPanel = () => {
         )}
       </div>
     </div>
+
+    {/* Broadcast Modal */}
+    <BroadcastModal
+      open={broadcastModalOpen}
+      onClose={() => setBroadcastModalOpen(false)}
+      selectedUsers={selectedUsersForBroadcast}
+      sendToAll={sendToAll}
+    />
+    </>
   );
 };
 
