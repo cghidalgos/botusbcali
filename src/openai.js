@@ -1,18 +1,33 @@
 
 import dotenv from "dotenv";
-import OpenAI from "openai";
+import Anthropic from "@anthropic-ai/sdk";
 import { addHistoryEntry } from "./config/historyStore.js";
-import { getMemory, setMemory } from "./config/memoryStore.js";
-import { getEmbedding } from "./embeddings.js";
+import { getMemory, setMemory, getConversation, appendConversationTurn } from "./config/memoryStore.js";
+import { getEmbedding, getQueryEmbedding } from "./embeddings.js";
 import { findSimilarFAQ, upsertFAQ, incrementFAQHit } from "./config/faqStore.js";
 import { detectCategory } from "./config/categoryDetector.js";
 import { searchSimilarChunks } from "./config/documentVectorIndex.js";
+import { DEFAULT_BOT_ID, normalizeBotId } from "./config/botContext.js";
+import { recordChatCompletionUsage, recordQuestion } from "./config/metricsStore.js";
+import { recordError } from "./config/errorStore.js";
+import { isScheduleText, answerProfessorSchedule } from "./scheduleParser.js";
+import { isKnowledgeGap, recordKnowledgeGap } from "./config/knowledgeGapsStore.js";
 
 dotenv.config();
 
-const client = process.env.OPENAI_API_KEY
-  ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+const defaultClient = process.env.ANTHROPIC_API_KEY
+  ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
   : null;
+const clientCache = new Map();
+
+function getClient(apiKey) {
+  const key = String(apiKey || "").trim();
+  if (!key) return defaultClient;
+  if (clientCache.has(key)) return clientCache.get(key);
+  const client = new Anthropic({ apiKey: key });
+  clientCache.set(key, client);
+  return client;
+}
 
 function cosineSimilarity(a, b) {
   let dot = 0;
@@ -27,28 +42,25 @@ function cosineSimilarity(a, b) {
   return dot / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-async function buildMemorySummary({ previous, question, answer, model }) {
+async function buildMemorySummary({ previous, question, answer, model, apiKey }) {
   const entry = `Q: ${question}\nA: ${answer}`.trim();
   const combined = previous ? `${previous}\n${entry}` : entry;
+  const client = getClient(apiKey);
   if (!client) {
     return combined.slice(-4000);
   }
   if (combined.length < 2500) {
     return combined;
   }
-  const response = await client.chat.completions.create({
-    model,
-    messages: [
-      {
-        role: "system",
-        content:
-          "Resume la conversación en español, máximo 1200 caracteres. Conserva nombres, cargos, correos y datos clave.",
-      },
-      { role: "user", content: combined },
-    ],
-    temperature: 0.2,
+  const response = await client.messages.create({
+    // El resumen de memoria es una tarea sencilla: usar el modelo económico
+    // (Haiku) abarata cada turno sin afectar la calidad del resumen.
+    model: process.env.CLAUDE_SUMMARY_MODEL || "claude-haiku-4-5-20251001",
+    max_tokens: 600,
+    system: "Resume la conversación en español, máximo 1200 caracteres. Conserva nombres, cargos, correos y datos clave.",
+    messages: [{ role: "user", content: combined }],
   });
-  return response.choices?.[0]?.message?.content?.trim()?.slice(0, 2000) || combined.slice(-4000);
+  return response.content?.[0]?.text?.trim()?.slice(0, 2000) || combined.slice(-4000);
 }
 
 function normalizeForSearch(value) {
@@ -356,43 +368,124 @@ function getFieldValue(row, ...candidates) {
   return "";
 }
 
-export async function composeResponse({ incomingText, context, documents, chatId }) {
+export async function composeResponse({ incomingText, context, documents, chatId, botId, openaiApiKey, claudeApiKey }) {
+  // Support both parameter names during migration; claudeApiKey takes precedence
+  openaiApiKey = claudeApiKey || openaiApiKey || "";
+  const resolvedBotId = normalizeBotId(botId || DEFAULT_BOT_ID);
   const { activePrompt, additionalNotes, promptTemplate } = context ?? {};
   const rawQuestion = String(incomingText || "");
   const normalizedQuestion = normalizeForSearch(rawQuestion);
   if (/(\bgracias\b|\bperfecto\b|\blo hiciste bien\b|\bexcelente\b|\bmuy bien\b)/i.test(rawQuestion)) {
     return "Con todo el gusto.";
   }
-
-  // Sistema de caché FAQ: buscar respuestas similares cacheadas
-  try {
-    const questionEmbedding = await getEmbedding(rawQuestion);
-    if (questionEmbedding) {
-      const similarFAQ = findSimilarFAQ(questionEmbedding, 0.85);
-      if (similarFAQ) {
-        console.log(`✓ FAQ Cache HIT (${(similarFAQ.similarity * 100).toFixed(1)}% similitud): "${rawQuestion}" → usando respuesta cacheada`);
-        incrementFAQHit(similarFAQ.id);
         
-        // Guardar en historial con indicador de caché
-        addHistoryEntry({
-          question: incomingText,
-          answer: similarFAQ.answer,
-          context,
-          usedDocuments: [],
-          chatId,
-          fromCache: true,
-          cacheHitId: similarFAQ.id,
-        });
-        
-        return similarFAQ.answer;
-      }
+    // Si el contexto está vacío, no usar el institucional del default
+    const isEmptyContext = (!activePrompt || !activePrompt.trim()) && (!additionalNotes || !additionalNotes.trim());
+    if (isEmptyContext) {
+      return "Soy un bot sin configuración de contexto. Por favor, configura el contexto en el panel de administración.";
     }
-  } catch (cacheError) {
-    console.error("Error en FAQ cache lookup:", cacheError);
-    // Continuar con flujo normal si falla el caché
+
+  // === Horarios de profesores (PRIORIDAD MÁXIMA) ===
+  // Parser dedicado para el documento de horarios (TSV). Corre ANTES del caché
+  // FAQ para que estas preguntas siempre den datos exactos y no lean/escriban
+  // respuestas cacheadas obsoletas.
+  const mentionsSchedule =
+    /\b(horario|horarios|clase|clases|materia|materias|asignatura|asignaturas|dicta|dictan|imparte|imparten|ensena|enseña|cuando|en\s+que\s+dias?|que\s+dias?|salon|salón|aula|correo|email|e-?mail|contacto|contactar|telefono|teléfono)\b/.test(
+      normalizedQuestion
+    );
+  if (mentionsSchedule) {
+    try {
+      const scheduleDoc = documents.find((doc) =>
+        isScheduleText(String(doc?.extractedText || ""))
+      );
+      if (scheduleDoc) {
+        const scheduleAnswer = answerProfessorSchedule(
+          scheduleDoc.extractedText,
+          rawQuestion
+        );
+        if (scheduleAnswer) {
+          addHistoryEntry(
+            {
+              question: incomingText,
+              answer: scheduleAnswer,
+              context,
+              usedDocuments: [scheduleDoc.originalName],
+              chatId,
+            },
+            resolvedBotId
+          );
+          if (chatId) {
+            try {
+              appendConversationTurn(resolvedBotId, chatId, rawQuestion, scheduleAnswer);
+            } catch (turnError) {
+              console.error("No se pudo guardar turno (horario)", turnError);
+            }
+          }
+          console.log(`✓ Horario resuelto por parser dedicado: "${rawQuestion}"`);
+          return scheduleAnswer;
+        }
+      }
+    } catch (scheduleError) {
+      console.error("Error en parser de horarios:", scheduleError);
+      // Continuar con el flujo normal si el parser falla.
+    }
   }
 
-  const memory = chatId ? getMemory(chatId) : "";
+  // Detectar si la pregunta es un seguimiento que depende del contexto previo
+  // (pronombres, preguntas muy cortas, conectores). En esos casos NO usamos el
+  // caché FAQ, porque la respuesta cacheada ignoraría la conversación.
+  const hasConversationContext = chatId
+    ? getConversation(resolvedBotId, chatId).length > 0
+    : false;
+  const looksLikeFollowUp =
+    /^(y|pero|entonces|ademas|además|tambien|también|ok|vale|listo|si|sí|no|ese|esa|eso|esos|esas|el|ella|ellos|aquel|dame|mas|más|otro|otra|cual|cuál|por que|por qué|porque|y el|y la|y los|el segundo|el primero|continua|continúa|sigue|amplia|amplía|explica|detalla)\b/i.test(
+      normalizedQuestion
+    ) || rawQuestion.trim().split(/\s+/).length <= 3;
+  const skipCache = hasConversationContext && looksLikeFollowUp;
+
+  // Sistema de caché FAQ: buscar respuestas similares cacheadas
+  if (!skipCache) {
+    try {
+      const questionEmbedding = await getEmbedding(rawQuestion, {
+        botId: resolvedBotId,
+        apiKey: openaiApiKey,
+      });
+      if (questionEmbedding) {
+        const similarFAQ = findSimilarFAQ(questionEmbedding, 0.92, resolvedBotId);
+        if (similarFAQ) {
+          console.log(`✓ FAQ Cache HIT (${(similarFAQ.similarity * 100).toFixed(1)}% similitud): "${rawQuestion}" → usando respuesta cacheada`);
+          incrementFAQHit(similarFAQ.id, resolvedBotId);
+
+          // Guardar en historial con indicador de caché
+          addHistoryEntry({
+            question: incomingText,
+            answer: similarFAQ.answer,
+            context,
+            usedDocuments: [],
+            chatId,
+            fromCache: true,
+            cacheHitId: similarFAQ.id,
+          }, resolvedBotId);
+
+          // Guardar el turno para mantener coherencia en seguimientos.
+          if (chatId) {
+            try {
+              appendConversationTurn(resolvedBotId, chatId, rawQuestion, similarFAQ.answer);
+            } catch (turnError) {
+              console.error("No se pudo guardar el turno (cache hit)", turnError);
+            }
+          }
+
+          return similarFAQ.answer;
+        }
+      }
+    } catch (cacheError) {
+      console.error("Error en FAQ cache lookup:", cacheError);
+      // Continuar con flujo normal si falla el caché
+    }
+  }
+
+  const memory = chatId ? getMemory(resolvedBotId, chatId) : "";
   const stopTokens = new Set([
     "quien",
     "quién",
@@ -600,11 +693,24 @@ export async function composeResponse({ incomingText, context, documents, chatId
       if (!text) continue;
       const scholarships = parseScholarships(text);
       if (scholarships.length) {
+        const seenNames = new Set();
         const formatted = scholarships
+          .filter((entry) => {
+            // Evitar duplicados (p. ej. la misma beca en /es/ y /en/).
+            const key = normalizeForSearch(entry.name);
+            if (!key || seenNames.has(key)) return false;
+            seenNames.add(key);
+            return true;
+          })
           .map((entry) => {
             const parts = [entry.name];
-            if (entry.description) {
-              parts.push(entry.description);
+            // Las "descripciones" del scraping a veces traen el menú COMPLETO
+            // del sitio (miles de caracteres de basura), lo que parte la
+            // respuesta en muchos mensajes enormes. Solo incluimos descripciones
+            // cortas y legibles; las gigantes se omiten.
+            const desc = String(entry.description || "").trim();
+            if (desc && desc.length <= 200) {
+              parts.push(desc);
             }
             parts.push(`Ver detalles: ${entry.link}`);
             return parts.join("\n");
@@ -617,7 +723,8 @@ export async function composeResponse({ incomingText, context, documents, chatId
         if (normalizedLine.includes("beca")) {
           if (line.includes("http")) {
             matchedLinks.push(line.trim());
-          } else {
+          } else if (line.trim().length <= 200) {
+            // Ignorar líneas gigantes (menús de navegación scrapeados).
             matchedLines.push(line.trim());
           }
         }
@@ -689,57 +796,58 @@ export async function composeResponse({ incomingText, context, documents, chatId
 
   const relevantSnippets = [];
   const semanticSnippets = [];
+  // Use query-optimized embedding for retrieval (voyage-3 query mode)
   let queryEmbedding = null;
   try {
-    queryEmbedding = await getEmbedding(rawQuestion);
+    queryEmbedding = await getQueryEmbedding(rawQuestion, {
+      botId: resolvedBotId,
+      apiKey: openaiApiKey,
+    });
   } catch (embedError) {
     console.error("Embeddings de consulta fallidos", embedError);
   }
-  
+
+  const SCORE_THRESHOLD = Number.parseFloat(process.env.EMBEDDING_SCORE_THRESHOLD || "0.45");
+  const MAX_SEMANTIC_SNIPPETS = Number.parseInt(process.env.SEARCH_MAX_SNIPPETS || "15", 10);
+
   if (queryEmbedding) {
-    // Si está habilitado el índice de vectores, usar búsqueda optimizada
     if (process.env.USE_VECTOR_INDEX === 'true') {
       try {
-        const indexResults = searchSimilarChunks(queryEmbedding, 20, { ef: 100 });
-        indexResults.forEach((item) => {
-          if (item.text) {
-            semanticSnippets.push(item.text);
-          }
+        const indexResults = searchSimilarChunks(queryEmbedding, MAX_SEMANTIC_SNIPPETS + 10, {
+          ef: 150,
+          botId: resolvedBotId,
         });
+        indexResults
+          .filter(item => (item.score ?? 1) >= SCORE_THRESHOLD && item.text)
+          .slice(0, MAX_SEMANTIC_SNIPPETS)
+          .forEach(item => semanticSnippets.push(
+            item.source ? `[${item.source}] ${item.text}` : item.text
+          ));
       } catch (indexError) {
         console.error("Error en búsqueda con índice, fallback a búsqueda lineal:", indexError);
-        // Fallback a búsqueda lineal
-        const scored = [];
-        for (const doc of sortedDocuments) {
-          const chunks = Array.isArray(doc.chunks) ? doc.chunks : [];
-          for (const chunk of chunks) {
-            if (!chunk?.embedding || !Array.isArray(chunk.embedding)) continue;
-            const score = cosineSimilarity(queryEmbedding, chunk.embedding);
-            scored.push({ score, text: chunk.text, doc });
-          }
-        }
-        scored.sort((a, b) => b.score - a.score);
-        scored.slice(0, 20).forEach((item) => {
-          if (item.text) {
-            semanticSnippets.push(item.text);
-          }
-        });
       }
-    } else {
-      // Búsqueda lineal tradicional (para compatibilidad o cuando el índice está deshabilitado)
+    }
+    // Always run linear search as supplement/fallback
+    if (semanticSnippets.length < MAX_SEMANTIC_SNIPPETS) {
       const scored = [];
       for (const doc of sortedDocuments) {
+        const docName = doc.originalName || "";
         const chunks = Array.isArray(doc.chunks) ? doc.chunks : [];
         for (const chunk of chunks) {
           if (!chunk?.embedding || !Array.isArray(chunk.embedding)) continue;
           const score = cosineSimilarity(queryEmbedding, chunk.embedding);
-          scored.push({ score, text: chunk.text, doc });
+          if (score >= SCORE_THRESHOLD) {
+            scored.push({ score, text: chunk.text, docName });
+          }
         }
       }
       scored.sort((a, b) => b.score - a.score);
-      scored.slice(0, 20).forEach((item) => {
-        if (item.text) {
-          semanticSnippets.push(item.text);
+      const existingTexts = new Set(semanticSnippets);
+      scored.slice(0, MAX_SEMANTIC_SNIPPETS).forEach(item => {
+        const snippet = item.docName ? `[${item.docName}] ${item.text}` : item.text;
+        if (!existingTexts.has(snippet)) {
+          semanticSnippets.push(snippet);
+          existingTexts.add(snippet);
         }
       });
     }
@@ -779,7 +887,28 @@ export async function composeResponse({ incomingText, context, documents, chatId
     }
   }
 
-  const finalSnippets = (semanticSnippets.length ? semanticSnippets : relevantSnippets).slice(0, 12);
+  // Búsqueda híbrida: fusionar fragmentos semánticos (por significado) con los
+  // de coincidencia por palabras clave (por términos exactos). Esto mejora la
+  // recuperación de datos que la búsqueda vectorial podría no rankear alto pero
+  // que contienen el término exacto preguntado.
+  const finalSnippets = [];
+  const seenSnippets = new Set();
+  const normalizeSnippetKey = (s) => normalizeForSearch(s).slice(0, 120);
+  const pushSnippet = (s) => {
+    if (!s) return;
+    const key = normalizeSnippetKey(s);
+    if (!key || seenSnippets.has(key)) return;
+    seenSnippets.add(key);
+    finalSnippets.push(s);
+  };
+  // Reservamos ~70% para semánticos y ~30% para palabras clave, pero rellenamos
+  // con lo que haya disponible si una de las fuentes queda corta.
+  const semanticBudget = Math.ceil(MAX_SEMANTIC_SNIPPETS * 0.7);
+  semanticSnippets.slice(0, semanticBudget).forEach(pushSnippet);
+  relevantSnippets.forEach(pushSnippet);
+  // Completar con semánticos restantes hasta el límite.
+  semanticSnippets.slice(semanticBudget).forEach(pushSnippet);
+  finalSnippets.length = Math.min(finalSnippets.length, MAX_SEMANTIC_SNIPPETS);
 
   if (isTeachingQuery && targetTerms.length) {
     const scheduleEntries = [];
@@ -996,22 +1125,36 @@ export async function composeResponse({ incomingText, context, documents, chatId
     ? `Memoria de conversación:\n${memory.slice(-1000)}`
     : "";
 
-  const defaultPrompt = [
-    "Actúa como un asistente experto en las instrucciones provistas.",
-    "Responde usando la información de los documentos y el texto extraído, tambien de https://usbcali.edu.co/facultad/ingenieria/ y/o con inromacion basica sobre los programas de ingenieria.",
-    "Si el usuario pide toda la información, entrega el texto completo del documento relevante.",
-    "Responde con información de costos del año 2026.  no muestres del 2025.",
-    "Responde en texto plano, sin Markdown ni encabezados.",
-    activePrompt && `Contexto base: ${activePrompt}`,
-    additionalNotes && `Notas adicionales: ${additionalNotes}`,
-    memoryBlock,
-    documentNotes && `Documentos: ${documentNotes}`,
+  // Ahorro de tokens: si la búsqueda híbrida ya produjo fragmentos relevantes,
+  // esos llevan el contexto necesario y volcar los documentos completos es
+  // redundante. Solo usamos el volcado completo como respaldo cuando no hubo
+  // ningún fragmento (la calidad se mantiene porque el dato relevante ya viaja
+  // en los fragmentos, y las preguntas de "dame todo" usan fullDocBlock aparte).
+  const effectiveDocumentNotes = finalSnippets.length === 0 ? documentNotes : "";
+
+  // Material pesado de documentos (cuando aplica): se envía como bloque aparte
+  // para poder cachearlo y abaratar peticiones seguidas.
+  const defaultDocMaterial = [
+    effectiveDocumentNotes && `Documentos disponibles:\n${effectiveDocumentNotes}`,
     fullDocBlock,
-    finalSnippets.length && `Fragmentos relevantes:\n${finalSnippets.join("\n")}`,
-    `Pregunta: ${incomingText}`,
   ]
     .filter(Boolean)
-    .join("\n");
+    .join("\n\n");
+
+  // Cuerpo dinámico del prompt (varía por pregunta). El contexto base
+  // (activePrompt / additionalNotes) se movió al bloque de sistema cacheado.
+  const defaultPromptBody = [
+    "Responde la siguiente pregunta siguiendo las reglas del sistema.",
+    "Para datos institucionales específicos usa solo los documentos y cita la fuente entre corchetes [nombre_documento].",
+    "Para preguntas conceptuales de ingeniería puedes usar conocimiento general, pero conéctalas siempre con el programa correspondiente de la USB Cali y motiva a estudiar en la universidad.",
+    "Si el usuario pide toda la información, entrega el texto completo del documento relevante.",
+    "Para costos usa el año 2026, no muestres 2025.",
+    memoryBlock,
+    finalSnippets.length && `Fragmentos relevantes (con fuente entre corchetes):\n${finalSnippets.join("\n---\n")}`,
+    `Pregunta del usuario: ${incomingText}`,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 
   const trimmedTemplate = promptTemplate?.trim();
   let assembledPrompt = trimmedTemplate
@@ -1020,7 +1163,7 @@ export async function composeResponse({ incomingText, context, documents, chatId
         .replaceAll("{additionalNotes}", additionalNotes || "")
         .replaceAll("{documentNotes}", documentNotes || "")
         .replaceAll("{incomingText}", incomingText || "")
-    : defaultPrompt;
+    : "";
 
   if (trimmedTemplate) {
     if (!trimmedTemplate.includes("{activePrompt}") && activePrompt) {
@@ -1046,40 +1189,188 @@ export async function composeResponse({ incomingText, context, documents, chatId
     }
   }
 
+  const client = getClient(openaiApiKey);
   if (!client) {
-    return `OPENAI_API_KEY no configurada. Esta es la petición armada:\n${assembledPrompt}`;
+    return `ANTHROPIC_API_KEY no configurada. Configura la clave en el panel de administración o en el archivo .env`;
   }
 
-  const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
-  const maxTokens = Number.parseInt(process.env.OPENAI_MAX_TOKENS || "500", 10);
-  const response = await client.chat.completions.create({
-    model,
-    messages: [
-      {
-        role: "system",
-        content:
-          "Eres un asistente que responde siguiendo el contexto y documentos cargados. Si preguntan por un docente (p. ej., '¿Quién es X?'), responde con su rol y muestra sus títulos y correo exactamente como aparecen en el texto extraído.",
-      },
-      { role: "user", content: assembledPrompt },
-    ],
-    temperature: 0.2,
-    max_tokens: Number.isFinite(maxTokens) && maxTokens > 0 ? maxTokens : 500,
-  });
+  // Ruteo de modelo: cuando la respuesta depende de datos institucionales
+  // recuperados (fragmentos relevantes o documento completo), usamos el modelo
+  // preciso (Sonnet) para no perder exactitud. Para preguntas conceptuales o
+  // generales sin datos recuperados, el modelo económico (Haiku) basta.
+  // Para desactivar el ruteo: CLAUDE_MODEL_SIMPLE igual a CLAUDE_MODEL.
+  const complexModel = process.env.CLAUDE_MODEL || "claude-sonnet-4-6";
+  const simpleModel = process.env.CLAUDE_MODEL_SIMPLE || "claude-haiku-4-5-20251001";
+  const hasInstitutionalData = finalSnippets.length > 0 || Boolean(fullDocText);
+  const model = hasInstitutionalData ? complexModel : simpleModel;
+  const maxTokens = Number.parseInt(process.env.CLAUDE_MAX_TOKENS || "1500", 10);
 
-  const answer = response.choices?.[0]?.message?.content?.trim() ?? "No se obtuvo respuesta.";
+  const systemPrompt = [
+    "Eres el asistente virtual de la Facultad de Ingeniería de la Universidad de San Buenaventura Cali (USB Cali). Tu objetivo es informar y orientar a estudiantes e interesados, y promover los programas de la universidad.",
+    "",
+    "Cómo responder según el tipo de pregunta:",
+    "",
+    "1) DATOS INSTITUCIONALES ESPECÍFICOS (costos, horarios, fechas, requisitos, becas, contactos, nombres de docentes, trámites): usa ÚNICAMENTE la información de los documentos y fragmentos provistos. Cita la fuente entre corchetes: [nombre_archivo]. Si el dato puntual no está en los documentos, dilo con claridad y sugiere a quién contactar.",
+    "",
+    "2) PREGUNTAS CONCEPTUALES O GENERALES DE INGENIERÍA (por ejemplo: '¿qué se ve en ingeniería de sistemas?', '¿qué hace un ingeniero industrial?', '¿de qué trata la ingeniería biomédica?'): SÍ puedes usar tu conocimiento general para dar una respuesta útil, clara y educativa. PERO siempre debes conectar la respuesta con el programa correspondiente que ofrece la USB Cali según los documentos: menciona que la universidad tiene ese programa, destaca sus áreas o materias si aparecen en los documentos, e invita a conocer más (pénsum, costos, inscripción).",
+    "",
+    "Reglas generales:",
+    "- Nunca inventes datos institucionales específicos (precios, fechas, correos, nombres). Esos solo salen de los documentos.",
+    "- El conocimiento general solo se usa para explicar conceptos de ingeniería, nunca para inventar información de la universidad.",
+    "- Si preguntan por un docente, muestra su nombre, cargo, títulos y correo exactamente como aparecen en los documentos.",
+    "- Siempre orienta hacia los programas de la USB Cali y motiva al usuario a estudiar en la universidad.",
+    "- Responde en español, en texto plano, sin Markdown ni encabezados. Sé claro y cercano.",
+  ].join("\n");
+
+  // Recuperar turnos previos de la conversación para mantener coherencia.
+  const conversationTurns = chatId ? getConversation(resolvedBotId, chatId) : [];
+
+  // Asegurar que el historial empiece con un mensaje de usuario y alterne roles
+  // correctamente (requisito de la API de Claude).
+  const sanitizedTurns = [];
+  for (const turn of conversationTurns) {
+    if (!turn || !turn.content) continue;
+    const role = turn.role === "assistant" ? "assistant" : "user";
+    const last = sanitizedTurns[sanitizedTurns.length - 1];
+    if (last && last.role === role) {
+      // Fusionar mensajes consecutivos del mismo rol.
+      last.content += `\n${turn.content}`;
+    } else {
+      sanitizedTurns.push({ role, content: String(turn.content) });
+    }
+  }
+  // El historial debe iniciar con "user".
+  while (sanitizedTurns.length && sanitizedTurns[0].role !== "user") {
+    sanitizedTurns.shift();
+  }
+
+  // Bloques de sistema cacheados: prompt fijo + contexto base estático (idéntico
+  // en todas las peticiones). Así la API los cobra al ~10% en peticiones seguidas
+  // dentro de la ventana de caché.
+  const systemBlocks = [
+    { type: "text", text: systemPrompt, cache_control: { type: "ephemeral" } },
+  ];
+  if (!trimmedTemplate) {
+    const baseContextText = [
+      activePrompt && `Contexto base: ${activePrompt}`,
+      additionalNotes && `Notas adicionales: ${additionalNotes}`,
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+    if (baseContextText) {
+      systemBlocks.push({
+        type: "text",
+        text: baseContextText,
+        cache_control: { type: "ephemeral" },
+      });
+    }
+  }
+
+  // Mensaje de usuario. En modo plantilla va como texto plano; en modo por
+  // defecto va en bloques, con el material pesado de documentos cacheado aparte
+  // (se reutiliza entre preguntas que tocan el mismo documento).
+  let userContent;
+  if (trimmedTemplate) {
+    userContent = assembledPrompt;
+  } else {
+    const blocks = [];
+    if (defaultDocMaterial) {
+      blocks.push({
+        type: "text",
+        text: defaultDocMaterial,
+        cache_control: { type: "ephemeral" },
+      });
+    }
+    blocks.push({ type: "text", text: defaultPromptBody });
+    userContent = blocks;
+  }
+
+  // Cachear el prefijo del historial: el historial es de solo-anexado (ventana
+  // deslizante), así que el contenido previo a la pregunta nueva es idéntico
+  // entre turnos seguidos. Marcando el último turno previo, la API cobra toda la
+  // conversación acumulada al ~10% dentro de la ventana de caché. Mismo
+  // contenido que antes: no afecta la calidad, solo abarata los tokens repetidos.
+  const historyMessages = sanitizedTurns.map((turn) => ({ ...turn }));
+  if (historyMessages.length > 0) {
+    const lastIdx = historyMessages.length - 1;
+    historyMessages[lastIdx] = {
+      role: historyMessages[lastIdx].role,
+      content: [
+        {
+          type: "text",
+          text: historyMessages[lastIdx].content,
+          cache_control: { type: "ephemeral" },
+        },
+      ],
+    };
+  }
+
+  let response;
+  try {
+    response = await client.messages.create({
+      model,
+      max_tokens: Number.isFinite(maxTokens) && maxTokens > 0 ? maxTokens : 1500,
+      system: systemBlocks,
+      messages: [
+        ...historyMessages,
+        { role: "user", content: userContent },
+      ],
+    });
+  } catch (error) {
+    await recordError("claude_completion", error?.message || "Error en Claude", {
+      botId: resolvedBotId,
+      context: { model },
+    });
+    throw error;
+  }
+
+  if (response?.usage) {
+    await recordChatCompletionUsage(resolvedBotId, {
+      prompt_tokens: response.usage.input_tokens || 0,
+      completion_tokens: response.usage.output_tokens || 0,
+      total_tokens: (response.usage.input_tokens || 0) + (response.usage.output_tokens || 0),
+    });
+  }
+  await recordQuestion(resolvedBotId, rawQuestion);
+
+  const answer = response.content?.[0]?.text?.trim() ?? "No se obtuvo respuesta.";
 
   if (chatId) {
+    // Guardar el turno real de la conversación (ventana deslizante).
+    try {
+      appendConversationTurn(resolvedBotId, chatId, rawQuestion, answer);
+    } catch (turnError) {
+      console.error("No se pudo guardar el turno de conversación", turnError);
+    }
+    // Mantener también el resumen de largo plazo (para historial / contexto extendido).
     try {
       const updatedMemory = await buildMemorySummary({
         previous: memory,
         question: rawQuestion,
         answer,
-        model,
+        apiKey: openaiApiKey, // Claude API key
       });
-      setMemory(chatId, updatedMemory);
+      setMemory(resolvedBotId, chatId, updatedMemory);
     } catch (memoryError) {
       console.error("Memoria no pudo actualizarse", memoryError);
     }
+  }
+
+  // Detectar vacío de conocimiento: si la respuesta indica que el bot no tuvo
+  // la información, registrarlo para que el admin sepa qué documento subir.
+  try {
+    if (isKnowledgeGap(answer)) {
+      await recordKnowledgeGap({
+        botId: resolvedBotId,
+        question: rawQuestion,
+        answer,
+        category: detectCategory(rawQuestion),
+        chatId,
+      });
+      console.log(`⚠ Vacío de conocimiento registrado: "${rawQuestion}"`);
+    }
+  } catch (gapError) {
+    console.error("No se pudo registrar vacío de conocimiento", gapError);
   }
 
   // Guardar en historial
@@ -1089,11 +1380,14 @@ export async function composeResponse({ incomingText, context, documents, chatId
     context,
     usedDocuments: documents.map(d => d.originalName),
     chatId,
-  });
+  }, resolvedBotId);
 
   // Guardar en FAQ cache para preguntas futuras similares
   try {
-    const questionEmbedding = await getEmbedding(rawQuestion);
+    const questionEmbedding = await getEmbedding(rawQuestion, {
+      botId: resolvedBotId,
+      apiKey: openaiApiKey,
+    });
     if (questionEmbedding && answer && answer.length > 10) {
       const category = detectCategory(rawQuestion);
       upsertFAQ({
@@ -1106,6 +1400,7 @@ export async function composeResponse({ incomingText, context, documents, chatId
           documentsUsed: documents.map(d => d.originalName),
           createdFrom: 'telegram',
         },
+        botId: resolvedBotId,
       });
       console.log(`✓ FAQ Cache SAVED: "${rawQuestion}" → categoría: ${category}`);
     }
@@ -1115,4 +1410,174 @@ export async function composeResponse({ incomingText, context, documents, chatId
   }
 
   return answer;
+}
+
+/**
+ * Genera 2-3 preguntas de seguimiento cortas y relacionadas con el tema, para
+ * mostrarlas como botones después de la respuesta. Usa un modelo rápido/barato
+ * (Haiku) y nunca falla la conversación si hay error.
+ */
+export async function suggestFollowUps({ question, answer, botId, claudeApiKey, openaiApiKey } = {}) {
+  const apiKey = claudeApiKey || openaiApiKey || "";
+  const resolvedBotId = normalizeBotId(botId || DEFAULT_BOT_ID);
+  const client = getClient(apiKey);
+  if (!client) return [];
+  const q = String(question || "").trim();
+  const a = String(answer || "").trim();
+  if (!q || !a) return [];
+
+  const model = process.env.CLAUDE_FOLLOWUP_MODEL || "claude-haiku-4-5-20251001";
+  const system = [
+    "Eres parte del asistente de la Facultad de Ingeniería de la USB Cali.",
+    "Dada una pregunta del usuario y la respuesta dada, genera 3 preguntas de seguimiento breves que el usuario probablemente querría hacer a continuación, sobre el MISMO tema.",
+    "Reglas:",
+    "- Cada pregunta: máximo 6 palabras, en español, clara y natural.",
+    "- Deben ser preguntas que este asistente pueda responder (sobre programas, costos, becas, horarios, docentes, inscripción, etc. de la USB Cali).",
+    "- NO repitas la pregunta original.",
+    "- Devuelve SOLO las 3 preguntas, una por línea, sin numeración, sin viñetas, sin texto extra.",
+  ].join("\n");
+
+  try {
+    const response = await client.messages.create({
+      model,
+      max_tokens: 150,
+      system,
+      messages: [{ role: "user", content: `Pregunta: ${q}\n\nRespuesta: ${a.slice(0, 1500)}` }],
+    });
+    if (response?.usage) {
+      await recordChatCompletionUsage(resolvedBotId, {
+        prompt_tokens: response.usage.input_tokens || 0,
+        completion_tokens: response.usage.output_tokens || 0,
+        total_tokens: (response.usage.input_tokens || 0) + (response.usage.output_tokens || 0),
+      });
+    }
+    const raw = response.content?.[0]?.text || "";
+    const items = raw
+      .split(/\r?\n/)
+      .map((l) => l.replace(/^[\s\-*•\d.)]+/, "").trim())
+      .filter((l) => l.length >= 4 && l.length <= 70)
+      .slice(0, 3);
+    return items;
+  } catch (error) {
+    console.error("suggestFollowUps error", error?.message || error);
+    return [];
+  }
+}
+
+/**
+ * Genera una respuesta mejorada para una pregunta (típicamente una que recibió
+ * 👎). Reutiliza la recuperación semántica + parser de horarios, pero NO guarda
+ * nada (ni historial, ni caché, ni conversación). Pensada para que un admin
+ * revise la sugerencia antes de aprobarla.
+ */
+export async function suggestImprovedAnswer({ question, documents = [], context = {}, botId, claudeApiKey, openaiApiKey } = {}) {
+  const apiKey = claudeApiKey || openaiApiKey || "";
+  const resolvedBotId = normalizeBotId(botId || DEFAULT_BOT_ID);
+  const rawQuestion = String(question || "").trim();
+  if (!rawQuestion) return { answer: "", source: "empty" };
+
+  // 1) Si es una pregunta de horarios, responder con el parser dedicado.
+  try {
+    const scheduleDoc = documents.find((doc) => isScheduleText(String(doc?.extractedText || "")));
+    if (scheduleDoc) {
+      const scheduleAnswer = answerProfessorSchedule(scheduleDoc.extractedText, rawQuestion);
+      if (scheduleAnswer) {
+        return { answer: scheduleAnswer, source: "schedule" };
+      }
+    }
+  } catch {
+    // continuar con el flujo general
+  }
+
+  const client = getClient(apiKey);
+  if (!client) {
+    return { answer: "", source: "no_api_key" };
+  }
+
+  // 2) Recuperación semántica de fragmentos relevantes.
+  const snippets = [];
+  try {
+    const queryEmbedding = await getQueryEmbedding(rawQuestion, { botId: resolvedBotId, apiKey: openaiApiKey });
+    if (queryEmbedding) {
+      const threshold = Number.parseFloat(process.env.EMBEDDING_SCORE_THRESHOLD || "0.45");
+      if (process.env.USE_VECTOR_INDEX === "true") {
+        try {
+          searchSimilarChunks(queryEmbedding, 20, { ef: 150, botId: resolvedBotId })
+            .filter((item) => (item.score ?? 1) >= threshold && item.text)
+            .forEach((item) => snippets.push(item.source ? `[${item.source}] ${item.text}` : item.text));
+        } catch { /* fallback abajo */ }
+      }
+      if (snippets.length < 12) {
+        const scored = [];
+        for (const doc of documents) {
+          const chunks = Array.isArray(doc.chunks) ? doc.chunks : [];
+          for (const chunk of chunks) {
+            if (!chunk?.embedding || !Array.isArray(chunk.embedding)) continue;
+            const score = cosineSimilarity(queryEmbedding, chunk.embedding);
+            if (score >= threshold) scored.push({ score, text: chunk.text, docName: doc.originalName || "" });
+          }
+        }
+        scored.sort((a, b) => b.score - a.score);
+        scored.slice(0, 15).forEach((it) => snippets.push(it.docName ? `[${it.docName}] ${it.text}` : it.text));
+      }
+    }
+  } catch (err) {
+    console.error("suggestImprovedAnswer: fallo recuperación", err);
+  }
+
+  // 3) Construir un prompt enfocado en dar la mejor respuesta posible.
+  const { activePrompt, additionalNotes } = context || {};
+  const documentNotes = documents
+    .slice(0, 8)
+    .map((d) => {
+      const text = String(d.extractedText || "").slice(0, 6000);
+      return text ? `### ${d.originalName}\n${text}` : "";
+    })
+    .filter(Boolean)
+    .join("\n\n");
+
+  const prompt = [
+    activePrompt && `Contexto base: ${activePrompt}`,
+    additionalNotes && `Notas: ${additionalNotes}`,
+    snippets.length && `Fragmentos relevantes (con fuente entre corchetes):\n${snippets.slice(0, 15).join("\n---\n")}`,
+    documentNotes && `Documentos disponibles:\n${documentNotes}`,
+    `Pregunta del usuario: ${rawQuestion}`,
+  ].filter(Boolean).join("\n\n");
+
+  const systemPrompt = [
+    "Eres un asistente universitario experto de la Facultad de Ingeniería (USB Cali).",
+    "Esta es una REVISIÓN: la respuesta anterior a esta pregunta fue marcada como insatisfactoria.",
+    "Da la MEJOR respuesta posible usando exclusivamente los documentos y fragmentos provistos.",
+    "Reglas:",
+    "- Cita la fuente entre corchetes cuando uses un documento: [nombre_archivo].",
+    "- Si la información NO está en los documentos, dilo con claridad y explica QUÉ documento o dato haría falta para responder bien (esto ayuda al administrador a saber qué subir).",
+    "- Responde en español, en texto plano, sin Markdown.",
+  ].join("\n");
+
+  const model = process.env.CLAUDE_MODEL || "claude-sonnet-4-6";
+  const maxTokens = Number.parseInt(process.env.CLAUDE_MAX_TOKENS || "1500", 10);
+
+  try {
+    const response = await client.messages.create({
+      model,
+      max_tokens: Number.isFinite(maxTokens) && maxTokens > 0 ? maxTokens : 1500,
+      system: systemPrompt,
+      messages: [{ role: "user", content: prompt }],
+    });
+    if (response?.usage) {
+      await recordChatCompletionUsage(resolvedBotId, {
+        prompt_tokens: response.usage.input_tokens || 0,
+        completion_tokens: response.usage.output_tokens || 0,
+        total_tokens: (response.usage.input_tokens || 0) + (response.usage.output_tokens || 0),
+      });
+    }
+    const answer = response.content?.[0]?.text?.trim() || "";
+    return { answer, source: "claude", usedDocuments: documents.map((d) => d.originalName) };
+  } catch (error) {
+    await recordError("claude_suggest", error?.message || "Error generando sugerencia", {
+      botId: resolvedBotId,
+      context: { model },
+    });
+    return { answer: "", source: "error", error: error?.message };
+  }
 }

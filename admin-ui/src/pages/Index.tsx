@@ -1,6 +1,7 @@
 import { MessageSquare, FileText, Clock, Activity, ArrowRight } from "lucide-react";
 import { Link } from "react-router-dom";
 import logoBot from "@/assets/logoBot.png";
+import { useAuth } from "@/lib/authContext";
 
 const sections = [
   {
@@ -34,6 +35,34 @@ const sections = [
 ];
 
 const Index = () => {
+  const { user } = useAuth();
+
+  if (user?.role === "admin") {
+    return (
+      <div className="space-y-8">
+        <div className="text-center space-y-4 py-8">
+          <img src={logoBot} alt="Bot" className="w-20 h-20 mx-auto object-contain" />
+          <h1 className="text-3xl md:text-4xl font-bold text-foreground">Administración de bots</h1>
+          <p className="text-muted-foreground max-w-lg mx-auto leading-relaxed">
+            Crea y administra los bots desde este panel.
+          </p>
+        </div>
+
+        <div className="panel text-center">
+          <p className="text-sm text-muted-foreground mb-4">
+            Ir a la gestión de bots para configurar tokens y claves por bot.
+          </p>
+          <Link
+            to="/bots"
+            className="btn-primary inline-flex items-center justify-center"
+          >
+            Gestionar bots
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-10">
       {/* Hero */}

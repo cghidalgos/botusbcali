@@ -4,13 +4,20 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import AppLayout from "@/components/AppLayout";
+import AuthGate from "@/components/AuthGate";
+import { AuthProvider } from "@/lib/authContext";
 import Index from "./pages/Index";
+import Login from "./pages/Login";
 import ContextPage from "./pages/ContextPage";
 import DocumentsPage from "./pages/DocumentsPage";
 import HistoryPage from "./pages/HistoryPage";
 import UsersPage from "./pages/UsersPage";
+import BotsPage from "./pages/BotsPage";
+import AuthUsersPage from "./pages/AuthUsersPage";
 import ActivityPage from "./pages/ActivityPage";
 import LearningPage from "./pages/LearningPage";
+import FeedbackPage from "./pages/FeedbackPage";
+import KnowledgeGapsPage from "./pages/KnowledgeGapsPage";
 import CategoriesPage from "./pages/CategoriesPage";
 import Surveys from "./pages/Surveys";
 import SurveyEditor from "./pages/SurveyEditor";
@@ -32,30 +39,39 @@ const getBasename = () => {
 
 const App = () => (
   <QueryClientProvider client={queryClient}>
-    <TooltipProvider>
-      <Toaster />
-      <Sonner />
-      <BrowserRouter basename={getBasename()}>
-        <Routes>
-          <Route element={<AppLayout />}>
-            <Route path="/" element={<Index />} />
-            <Route path="/contexto" element={<ContextPage />} />
-            <Route path="/documentos" element={<DocumentsPage />} />
-            <Route path="/historial" element={<HistoryPage />} />
-            <Route path="/usuarios" element={<UsersPage />} />
-            <Route path="/categorias" element={<CategoriesPage />} />
-            <Route path="/actividad" element={<ActivityPage />} />
-            <Route path="/aprendizaje" element={<LearningPage />} />
-            <Route path="/surveys" element={<Surveys />} />
-            <Route path="/surveys/new" element={<SurveyEditor />} />
-            <Route path="/surveys/:id/edit" element={<SurveyEditor />} />
-            <Route path="/surveys/:id/send" element={<SurveyEditor />} />
-            <Route path="/surveys/:id/results" element={<SurveyResults />} />
-          </Route>
-          <Route path="*" element={<NotFound />} />
-        </Routes>
-      </BrowserRouter>
-    </TooltipProvider>
+    <AuthProvider>
+      <TooltipProvider>
+        <Toaster />
+        <Sonner />
+        <BrowserRouter basename={getBasename()}>
+          <Routes>
+            <Route path="/login" element={<Login />} />
+            <Route element={<AuthGate />}>
+              <Route element={<AppLayout />}>
+                <Route path="/" element={<Index />} />
+                <Route path="/contexto" element={<ContextPage />} />
+                <Route path="/documentos" element={<DocumentsPage />} />
+                <Route path="/historial" element={<HistoryPage />} />
+                <Route path="/usuarios" element={<UsersPage />} />
+                <Route path="/bots" element={<BotsPage />} />
+                <Route path="/accesos" element={<AuthUsersPage />} />
+                <Route path="/categorias" element={<CategoriesPage />} />
+                <Route path="/actividad" element={<ActivityPage />} />
+                <Route path="/aprendizaje" element={<LearningPage />} />
+                <Route path="/feedback" element={<FeedbackPage />} />
+                <Route path="/vacios" element={<KnowledgeGapsPage />} />
+                <Route path="/surveys" element={<Surveys />} />
+                <Route path="/surveys/new" element={<SurveyEditor />} />
+                <Route path="/surveys/:id/edit" element={<SurveyEditor />} />
+                <Route path="/surveys/:id/send" element={<SurveyEditor />} />
+                <Route path="/surveys/:id/results" element={<SurveyResults />} />
+              </Route>
+            </Route>
+            <Route path="*" element={<NotFound />} />
+          </Routes>
+        </BrowserRouter>
+      </TooltipProvider>
+    </AuthProvider>
   </QueryClientProvider>
 );
 

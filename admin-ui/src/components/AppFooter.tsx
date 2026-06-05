@@ -6,7 +6,7 @@ const AppFooter = () => {
           © {new Date().getFullYear()} Bot Facultad de Ingeniería. Todos los derechos reservados.
         </p>
         <p className="text-xs text-muted-foreground">
-          Desarrollado <span className="font-semibold text-primary">By GHS</span>
+           <span className="font-semibold text-primary">By GHS & PADIA</span>
         </p>
       </div>
     </footer>

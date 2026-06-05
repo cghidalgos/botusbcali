@@ -2,6 +2,7 @@
 import fs from "fs";
 import path from "path";
 import { VectorIndex } from "./vectorIndex.js";
+import { DEFAULT_BOT_ID, normalizeBotId } from "./botContext.js";
 
 const INDEX_PATH = path.resolve("data/document-vector-index.json");
 const DATA_DIR = path.dirname(INDEX_PATH);
@@ -57,8 +58,9 @@ function persistIndex() {
 /**
  * Agrega chunks de un documento al índice
  */
-export function indexDocumentChunks(documentId, chunks) {
+export function indexDocumentChunks(documentId, chunks, { botId } = {}) {
   initIndex();
+  const resolved = normalizeBotId(botId || DEFAULT_BOT_ID);
   
   if (!chunks || !Array.isArray(chunks) || chunks.length === 0) {
     return;
@@ -73,6 +75,7 @@ export function indexDocumentChunks(documentId, chunks) {
     try {
       documentIndex.add(chunk.embedding, {
         documentId,
+        botId: resolved,
         text: chunk.text,
         meta: chunk.meta,
       });
@@ -97,6 +100,7 @@ export function indexDocumentChunks(documentId, chunks) {
  */
 export function searchSimilarChunks(queryEmbedding, k = 10, options = {}) {
   initIndex();
+  const resolved = options?.botId ? normalizeBotId(options.botId) : null;
   
   if (!queryEmbedding || !Array.isArray(queryEmbedding)) {
     return [];
@@ -111,13 +115,15 @@ export function searchSimilarChunks(queryEmbedding, k = 10, options = {}) {
       ef: options.ef || Math.max(k * 2, 50),
     });
     
-    return results.map(result => ({
-      text: result.metadata.text,
-      documentId: result.metadata.documentId,
-      meta: result.metadata.meta,
-      score: result.score,
-      similarity: result.score, // Compatibilidad con código existente
-    }));
+    return results
+      .filter((result) => !resolved || normalizeBotId(result.metadata?.botId || DEFAULT_BOT_ID) === resolved)
+      .map(result => ({
+        text: result.metadata.text,
+        documentId: result.metadata.documentId,
+        meta: result.metadata.meta,
+        score: result.score,
+        similarity: result.score, // Compatibilidad con código existente
+      }));
   } catch (err) {
     console.error("Error en búsqueda de índice:", err);
     return [];
@@ -127,8 +133,9 @@ export function searchSimilarChunks(queryEmbedding, k = 10, options = {}) {
 /**
  * Elimina chunks de un documento del índice
  */
-export function removeDocumentFromIndex(documentId) {
+export function removeDocumentFromIndex(documentId, botId) {
   initIndex();
+  const resolved = botId ? normalizeBotId(botId) : null;
   
   // Crear nuevo índice sin los chunks del documento eliminado
   const newIndex = new VectorIndex({
@@ -139,7 +146,11 @@ export function removeDocumentFromIndex(documentId) {
   });
   
   for (const item of documentIndex.vectors) {
-    if (item.metadata.documentId !== documentId) {
+    const matchesDoc = item.metadata.documentId === documentId;
+    const matchesBot = resolved
+      ? normalizeBotId(item.metadata?.botId || DEFAULT_BOT_ID) === resolved
+      : true;
+    if (!matchesDoc || !matchesBot) {
       newIndex.add(item.vector, item.metadata);
     }
   }
@@ -172,24 +183,31 @@ export function rebuildDocumentIndex() {
 /**
  * Obtiene estadísticas del índice
  */
-export function getIndexStats() {
+export function getIndexStats(botId) {
   initIndex();
+  const resolved = botId ? normalizeBotId(botId) : null;
   
   const stats = documentIndex.getStats();
   
   // Contar documentos únicos
   const documentIds = new Set();
   for (const item of documentIndex.vectors) {
+    if (resolved && normalizeBotId(item.metadata?.botId || DEFAULT_BOT_ID) !== resolved) {
+      continue;
+    }
     if (item.metadata?.documentId) {
       documentIds.add(item.metadata.documentId);
     }
   }
+  const filteredVectors = resolved
+    ? documentIndex.vectors.filter((item) => normalizeBotId(item.metadata?.botId || DEFAULT_BOT_ID) === resolved)
+    : documentIndex.vectors;
   
   return {
     ...stats,
     uniqueDocuments: documentIds.size,
-    totalChunks: documentIndex.vectors.length,
-    indexSize: documentIndex.vectors.length > 0 
+    totalChunks: filteredVectors.length,
+    indexSize: filteredVectors.length > 0 
       ? `~${(JSON.stringify(documentIndex.toJSON()).length / 1024 / 1024).toFixed(2)} MB`
       : "0 MB",
   };

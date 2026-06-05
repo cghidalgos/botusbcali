@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import crypto from "crypto";
+import { DEFAULT_BOT_ID, normalizeBotId } from "./botContext.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SURVEYS_FILE = path.join(__dirname, "../../data/surveys.json");
@@ -23,9 +24,23 @@ export function loadSurveys() {
       const raw = fs.readFileSync(SURVEYS_FILE, "utf-8");
       const parsed = JSON.parse(raw);
       surveysData = {
-        items: parsed.items || [],
-        responses: parsed.responses || [],
-        sessions: parsed.sessions || {},
+        items: (parsed.items || []).map((item) => ({
+          botId: normalizeBotId(item?.botId || DEFAULT_BOT_ID),
+          ...item,
+        })),
+        responses: (parsed.responses || []).map((response) => ({
+          botId: normalizeBotId(response?.botId || DEFAULT_BOT_ID),
+          ...response,
+        })),
+        sessions: Object.fromEntries(
+          Object.entries(parsed.sessions || {}).map(([id, session]) => [
+            id,
+            {
+              botId: normalizeBotId(session?.botId || DEFAULT_BOT_ID),
+              ...session,
+            },
+          ])
+        ),
       };
     }
     ready = true;
@@ -67,9 +82,11 @@ function generateId(prefix = "item") {
 /**
  * Crea una nueva encuesta o quiz
  */
-export function createSurvey(data) {
+export function createSurvey(data, botId) {
+  const resolved = normalizeBotId(botId || data?.botId || DEFAULT_BOT_ID);
   const survey = {
     id: generateId(data.type === "quiz" ? "quiz" : "survey"),
+    botId: resolved,
     type: data.type || "survey",
     title: data.title,
     description: data.description || "",
@@ -116,7 +133,8 @@ export function createSurvey(data) {
  * Obtiene todas las encuestas/quizzes
  */
 export function getAllSurveys(filters = {}) {
-  let items = [...surveysData.items];
+  const resolved = normalizeBotId(filters?.botId || DEFAULT_BOT_ID);
+  let items = surveysData.items.filter((item) => normalizeBotId(item?.botId) === resolved);
   
   if (filters.type) {
     items = items.filter((item) => item.type === filters.type);
@@ -135,21 +153,26 @@ export function getAllSurveys(filters = {}) {
 /**
  * Obtiene una encuesta por ID
  */
-export function getSurveyById(id) {
-  return surveysData.items.find((item) => item.id === id);
+export function getSurveyById(id, botId) {
+  const resolved = normalizeBotId(botId);
+  return surveysData.items.find((item) => item.id === id && normalizeBotId(item?.botId) === resolved);
 }
 
 /**
  * Actualiza una encuesta
  */
-export function updateSurvey(id, updates) {
-  const index = surveysData.items.findIndex((item) => item.id === id);
+export function updateSurvey(id, updates, botId) {
+  const resolved = normalizeBotId(botId || updates?.botId || DEFAULT_BOT_ID);
+  const index = surveysData.items.findIndex(
+    (item) => item.id === id && normalizeBotId(item?.botId) === resolved
+  );
   if (index === -1) return null;
   
   surveysData.items[index] = {
     ...surveysData.items[index],
     ...updates,
     id, // Preservar ID
+    botId: resolved,
     updatedAt: new Date().toISOString(),
   };
   
@@ -160,14 +183,19 @@ export function updateSurvey(id, updates) {
 /**
  * Elimina una encuesta
  */
-export function deleteSurvey(id) {
-  const index = surveysData.items.findIndex((item) => item.id === id);
+export function deleteSurvey(id, botId) {
+  const resolved = normalizeBotId(botId);
+  const index = surveysData.items.findIndex(
+    (item) => item.id === id && normalizeBotId(item?.botId) === resolved
+  );
   if (index === -1) return false;
   
   surveysData.items.splice(index, 1);
   
   // Eliminar respuestas asociadas
-  surveysData.responses = surveysData.responses.filter((r) => r.surveyId !== id);
+  surveysData.responses = surveysData.responses.filter(
+    (r) => !(r.surveyId === id && normalizeBotId(r?.botId) === resolved)
+  );
   
   saveSurveys();
   return true;
@@ -176,8 +204,8 @@ export function deleteSurvey(id) {
 /**
  * Marca una encuesta como enviada a usuarios específicos
  */
-export function markSurveyAsSent(id, userIds) {
-  const survey = getSurveyById(id);
+export function markSurveyAsSent(id, userIds, botId) {
+  const survey = getSurveyById(id, botId);
   if (!survey) return null;
   
   const updates = {
@@ -186,21 +214,24 @@ export function markSurveyAsSent(id, userIds) {
     sentCount: (survey.sentCount || 0) + userIds.length,
   };
   
-  return updateSurvey(id, updates);
+  return updateSurvey(id, updates, survey.botId);
 }
 
 /**
  * Cierra una encuesta
  */
-export function closeSurvey(id) {
-  return updateSurvey(id, { status: "closed" });
+export function closeSurvey(id, botId) {
+  return updateSurvey(id, { status: "closed" }, botId);
 }
 
 /**
  * Obtiene las respuestas de una encuesta
  */
-export function getSurveyResponses(surveyId, filters = {}) {
-  let responses = surveysData.responses.filter((r) => r.surveyId === surveyId);
+export function getSurveyResponses(surveyId, filters = {}, botId) {
+  const resolved = normalizeBotId(botId || filters?.botId || DEFAULT_BOT_ID);
+  let responses = surveysData.responses.filter(
+    (r) => r.surveyId === surveyId && normalizeBotId(r?.botId) === resolved
+  );
   
   if (filters.userId) {
     responses = responses.filter((r) => r.userId === filters.userId);
@@ -215,9 +246,11 @@ export function getSurveyResponses(surveyId, filters = {}) {
 /**
  * Guarda una respuesta de encuesta/quiz
  */
-export function saveResponse(data) {
+export function saveResponse(data, botId) {
+  const resolved = normalizeBotId(botId || data?.botId || DEFAULT_BOT_ID);
   const response = {
     id: generateId("resp"),
+    botId: resolved,
     surveyId: data.surveyId,
     userId: data.userId,
     username: data.username,
@@ -241,11 +274,11 @@ export function saveResponse(data) {
   surveysData.responses.push(response);
   
   // Actualizar contador de respuestas
-  const survey = getSurveyById(data.surveyId);
+  const survey = getSurveyById(data.surveyId, resolved);
   if (survey) {
     updateSurvey(data.surveyId, {
       responseCount: (survey.responseCount || 0) + 1,
-    });
+    }, resolved);
   }
   
   saveSurveys();
@@ -255,9 +288,10 @@ export function saveResponse(data) {
 /**
  * Obtiene el intento más reciente de un usuario para un quiz
  */
-export function getUserLatestAttempt(surveyId, userId) {
+export function getUserLatestAttempt(surveyId, userId, botId) {
+  const resolved = normalizeBotId(botId);
   const attempts = surveysData.responses.filter(
-    (r) => r.surveyId === surveyId && r.userId === userId
+    (r) => r.surveyId === surveyId && r.userId === userId && normalizeBotId(r?.botId) === resolved
   );
   
   if (attempts.length === 0) return null;
@@ -270,20 +304,21 @@ export function getUserLatestAttempt(surveyId, userId) {
 /**
  * Cuenta los intentos de un usuario en un quiz
  */
-export function getUserAttemptCount(surveyId, userId) {
+export function getUserAttemptCount(surveyId, userId, botId) {
+  const resolved = normalizeBotId(botId);
   return surveysData.responses.filter(
-    (r) => r.surveyId === surveyId && r.userId === userId
+    (r) => r.surveyId === surveyId && r.userId === userId && normalizeBotId(r?.botId) === resolved
   ).length;
 }
 
 /**
  * Obtiene estadísticas de una encuesta
  */
-export function getSurveyStats(surveyId) {
-  const survey = getSurveyById(surveyId);
+export function getSurveyStats(surveyId, botId) {
+  const survey = getSurveyById(surveyId, botId);
   if (!survey) return null;
   
-  const responses = getSurveyResponses(surveyId);
+  const responses = getSurveyResponses(surveyId, {}, survey.botId);
   
   if (survey.type === "survey") {
     // Estadísticas de encuesta
@@ -393,8 +428,8 @@ export function getSurveyStats(surveyId) {
 /**
  * Obtiene el leaderboard de un quiz
  */
-export function getQuizLeaderboard(surveyId, limit = 10) {
-  const responses = getSurveyResponses(surveyId);
+export function getQuizLeaderboard(surveyId, limit = 10, botId) {
+  const responses = getSurveyResponses(surveyId, {}, botId);
   
   // Agrupar por usuario y quedarse con su mejor intento
   const bestAttempts = new Map();
@@ -435,11 +470,12 @@ export function getQuizLeaderboard(surveyId, limit = 10) {
 /**
  * Gestión de sesiones activas (para tracking de respuestas en progreso)
  */
-export function createSession(userId, surveyId) {
+export function createSession(userId, surveyId, botId) {
   const sessionId = generateId("session");
   surveysData.sessions[sessionId] = {
     userId,
     surveyId,
+    botId: normalizeBotId(botId),
     currentQuestionIndex: 0,
     answers: [],
     startedAt: new Date().toISOString(),
@@ -449,34 +485,45 @@ export function createSession(userId, surveyId) {
   return sessionId;
 }
 
-export function getSession(sessionId) {
+export function getSession(sessionId, botId) {
+  const resolved = normalizeBotId(botId);
   const session = surveysData.sessions[sessionId] || null;
   if (!session) {
     console.log("[survey-session] not-found:", sessionId, "available:", Object.keys(surveysData.sessions));
   }
+  if (session && normalizeBotId(session?.botId) !== resolved) {
+    return null;
+  }
   return session;
 }
 
-export function updateSession(sessionId, updates) {
+export function updateSession(sessionId, updates, botId) {
+  const resolved = normalizeBotId(botId || updates?.botId || DEFAULT_BOT_ID);
   if (!surveysData.sessions[sessionId]) return null;
+  if (normalizeBotId(surveysData.sessions[sessionId]?.botId) !== resolved) return null;
   surveysData.sessions[sessionId] = {
     ...surveysData.sessions[sessionId],
     ...updates,
+    botId: resolved,
   };
   saveSurveys();
   return surveysData.sessions[sessionId];
 }
 
-export function deleteSession(sessionId) {
+export function deleteSession(sessionId, botId) {
+  const resolved = normalizeBotId(botId);
+  if (normalizeBotId(surveysData.sessions[sessionId]?.botId) !== resolved) return;
   console.log("[survey-session] deleted:", sessionId);
   delete surveysData.sessions[sessionId];
   saveSurveys();
 }
 
-export function getUserActiveSession(userId, surveyId) {
+export function getUserActiveSession(userId, surveyId, botId) {
+  const resolved = normalizeBotId(botId);
   const sessions = Object.entries(surveysData.sessions);
   const found = sessions.find(
     ([_, session]) => {
+      if (normalizeBotId(session?.botId) !== resolved) return false;
       if (session.userId !== userId) return false;
       // Si surveyId es null, buscar cualquier sesión del usuario
       if (surveyId === null || surveyId === undefined) return true;

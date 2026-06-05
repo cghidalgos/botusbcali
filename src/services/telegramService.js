@@ -13,6 +13,30 @@ function escapeHtml(text) {
     .replace(/>/g, "&gt;");
 }
 
+// Convierte a texto plano legible: quita tags HTML y decodifica las entidades
+// básicas. Se usa como respaldo cuando Telegram rechaza el HTML.
+function stripHtmlTags(text) {
+  return String(text)
+    .replace(/<[^>]*>/g, "")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
+// ¿El error de Telegram es por no poder parsear las entidades/HTML del mensaje?
+function isTelegramParseError(error) {
+  const status = error?.response?.status;
+  const description = String(
+    error?.response?.data?.description || error?.message || ""
+  ).toLowerCase();
+  return (
+    status === 400 &&
+    (description.includes("parse") ||
+      description.includes("entit") ||
+      description.includes("tag"))
+  );
+}
+
 function formatTelegramHtml(text, skipEscape = false) {
   // Si skipEscape es true, el texto ya tiene HTML válido
   if (skipEscape) {
@@ -88,6 +112,7 @@ export function createTelegramService({ token, delayBetweenPartsMs = 0, maxMessa
       sendDocument: mockError,
       answerCallbackQuery: mockError,
       editMessageReplyMarkup: mockError,
+      sendChatAction: async () => {},
     };
   }
 
@@ -96,8 +121,8 @@ export function createTelegramService({ token, delayBetweenPartsMs = 0, maxMessa
     // eslint-disable-next-line no-constant-condition
     while (true) {
       try {
-        await axios.post(`${apiBase}/${endpoint}`, payload, axiosConfig);
-        return;
+        const response = await axios.post(`${apiBase}/${endpoint}`, payload, axiosConfig);
+        return response?.data;
       } catch (error) {
         const classified = classifyTelegramSendError(error);
         if (classified.reason === "rate_limited" && attempt < maxRetries) {
@@ -122,23 +147,53 @@ export function createTelegramService({ token, delayBetweenPartsMs = 0, maxMessa
                     text.includes('<u>') || text.includes('</u>'));
     
     const parts = splitTelegramMessage(text, maxLength || maxMessageLength);
-    
-    for (const part of parts) {
-      await postWithRetry(
-        "sendMessage",
-        {
-          chat_id: chatId,
-          text: hasHtml ? part : formatTelegramHtml(part, false),
-          parse_mode: parseMode || "HTML",
-          ...telegramOptions,
-        },
-        {},
-        { maxRetries: maxRetries ?? 2 }
-      );
+
+    // reply_markup (botones) solo debe ir en la ÚLTIMA parte de un mensaje
+    // dividido, para no repetir los botones en cada fragmento.
+    const { reply_markup, ...restOptions } = telegramOptions;
+
+    // Devolvemos la respuesta de la ÚLTIMA parte (la que lleva los botones), para
+    // que quien llama pueda asociar datos a su message_id.
+    let lastResponse;
+    for (let i = 0; i < parts.length; i += 1) {
+      const part = parts[i];
+      const isLast = i === parts.length - 1;
+      const markup = isLast && reply_markup ? { reply_markup } : {};
+      try {
+        lastResponse = await postWithRetry(
+          "sendMessage",
+          {
+            chat_id: chatId,
+            text: hasHtml ? part : formatTelegramHtml(part, false),
+            parse_mode: parseMode || "HTML",
+            ...restOptions,
+            ...markup,
+          },
+          {},
+          { maxRetries: maxRetries ?? 2 }
+        );
+      } catch (error) {
+        // Si Telegram rechaza el formato (HTML malformado, p. ej. texto de
+        // documentos con tags sueltos o un tag partido al dividir el mensaje),
+        // reintentamos como TEXTO PLANO para garantizar que el mensaje llegue.
+        if (!isTelegramParseError(error)) throw error;
+        lastResponse = await postWithRetry(
+          "sendMessage",
+          {
+            chat_id: chatId,
+            text: stripHtmlTags(part),
+            ...restOptions,
+            ...markup,
+          },
+          {},
+          { maxRetries: maxRetries ?? 2 }
+        );
+      }
       if (delayBetweenPartsMs > 0) {
         await sleep(delayBetweenPartsMs);
       }
     }
+    return lastResponse;
   }
 
   function buildMediaCaption(caption) {
@@ -240,7 +295,6 @@ export function createTelegramService({ token, delayBetweenPartsMs = 0, maxMessa
     }
     await sendMediaByRef("sendDocument", "document", chatId, input, options);
   }
-preguntas
   async function answerCallbackQuery(callbackQueryId, options = {}) {
     await postWithRetry(
       "answerCallbackQuery",
@@ -265,6 +319,21 @@ preguntas
     );
   }
 
+  // Muestra el indicador "escribiendo..." en el chat. No reintenta: es efímero
+  // y no debe bloquear ni retrasar la respuesta real.
+  async function sendChatAction(chatId, action = "typing") {
+    try {
+      await postWithRetry(
+        "sendChatAction",
+        { chat_id: chatId, action },
+        {},
+        { maxRetries: 0 }
+      );
+    } catch {
+      // Silencioso: el indicador es decorativo.
+    }
+  }
+
   return {
     isConfigured: true,
     sendMessage,
@@ -274,5 +343,6 @@ preguntas
     sendDocument,
     answerCallbackQuery,
     editMessageReplyMarkup,
+    sendChatAction,
   };
 }

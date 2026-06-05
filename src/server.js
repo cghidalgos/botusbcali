@@ -24,24 +24,35 @@ import {
   updateDocument,
   documentsReady,
 } from "./config/documentStore.js";
-import { memoryReady } from "./config/memoryStore.js";
+import { memoryReady, clearConversation } from "./config/memoryStore.js";
+import { recordFeedback, listFeedback, getFeedbackStats, getFeedbackById, markFeedbackResolved, feedbackReady } from "./config/feedbackStore.js";
+import { listKnowledgeGaps, getKnowledgeGapsByCategory, getKnowledgeGapsStats, resolveKnowledgeGap, knowledgeGapsReady } from "./config/knowledgeGapsStore.js";
 import { listTelegramUsers, upsertTelegramUser, usersReady, markTelegramUserBlocked, markTelegramUserError, removeTelegramUser } from "./config/userStore.js";
 
-import { composeResponse } from "./openai.js";
+import { composeResponse, suggestImprovedAnswer, suggestFollowUps } from "./openai.js";
+import { PROGRAMS, getProgramById, buildProgramsKeyboard } from "./programs.js";
+import { applyCorrections } from "./corrections.js";
 import { processDocument } from "./documentProcessor.js";
 import { getHistory, clearHistory, getHistoryByChatId, clearHistoryForChatId } from "./config/historyStore.js";
+import { rememberFollowUps, getFollowUps } from "./config/followUpStore.js";
 import { chunkText, embedChunks, embedChunkDescriptors } from "./embeddings.js";
 import { chunkByStructure, extractHtmlSectionsFromHtml } from "./structuredChunking.js";
 import { createTelegramService, classifyTelegramSendError } from "./services/telegramService.js";
 import { getLearningPatterns, addLearningPattern, updateLearningPattern, deleteLearningPattern, getLearningStats, learningReady } from "./config/learningStore.js";
 import { getCategories, addCategory, deleteCategory, updateCategory, getSuggestedCategories, getSuggestedCategoriesPending, approveSuggestedCategory, rejectSuggestedCategory, updateSuggestedCategory, categoriesReady } from "./config/categoriesStore.js";
 import { getCacheStats, recordCacheHit, recordCacheEntry, cacheReady } from "./config/cacheStore.js";
-import { getAllFAQs, getFAQsByCategory, getTopFAQs, updateFAQ, deleteFAQ, toggleFAQ, getFAQStats } from "./config/faqStore.js";
+import { getAllFAQs, getFAQsByCategory, getTopFAQs, updateFAQ, deleteFAQ, toggleFAQ, getFAQStats, upsertFAQ } from "./config/faqStore.js";
+import { getEmbedding } from "./embeddings.js";
 import { getCategories as getFAQCategories } from "./config/categoryDetector.js";
 import { getEmbeddingCacheStats, cleanOldEmbeddings } from "./config/embeddingCache.js";
 import { getIndexStats, rebuildDocumentIndex, removeDocumentFromIndex } from "./config/documentVectorIndex.js";
 import { getAllSurveys, getSurveyById, createSurvey, updateSurvey, deleteSurvey, closeSurvey, markSurveyAsSent, getSurveyResponses, getSurveyStats, getQuizLeaderboard, surveysReady } from "./config/surveyStore.js";
 import { sendSurveyToUser, startSurvey, handleSurveyAnswer, handleMultipleChoiceToggle, showLeaderboard, handleTextAnswer } from "./services/surveyService.js";
+import { DEFAULT_BOT_ID, normalizeBotId } from "./config/botContext.js";
+import { botsReady, ensureDefaultBot, listBots, getBotById, createBot, updateBot, deleteBot } from "./config/botStore.js";
+import { authReady, ensureAdminFromEnv, ensureManagerFromEnv, authenticateUser, issueToken, validateToken, revokeToken, isAuthEnabled, listUsers, createUser, updateUser, deleteUser } from "./config/authStore.js";
+import { metricsReady, getMetricsOverview, getTopQuestions } from "./config/metricsStore.js";
+import { errorsReady, getRecentErrors, recordError } from "./config/errorStore.js";
 
 dotenv.config();
 
@@ -78,6 +89,22 @@ const broadcastUpload = multer({
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "5mb" }));
+
+app.use("/api", (req, res, next) => {
+  req.botId = resolveBotId(req);
+  return next();
+});
+
+app.use("/api", (req, res, next) => {
+  if (req.path.startsWith("/auth/")) return next();
+  return requireAuth(req, res, next);
+});
+
+app.use("/api", (req, res, next) => {
+  if (req.path.startsWith("/auth/")) return next();
+  if (req.path.startsWith("/bots")) return next();
+  return requireBotAccess(req, res, next);
+});
 
 // Support deployment under a subpath: if WEBHOOK_BASE has a pathname (e.g. https://host/botusbcali),
 // allow requests that include that prefix by stripping it before routing.
@@ -121,17 +148,306 @@ if (fs.existsSync(adminDistPath)) {
 }
 
 // API: historial de preguntas y respuestas
-app.get("/api/history", (req, res) => {
-  res.json(getHistory());
+app.post("/api/auth/login", (req, res) => {
+  const email = typeof req.body?.email === "string" ? req.body.email.trim() : "";
+  const password = typeof req.body?.password === "string" ? req.body.password : "";
+  if (!email || !password) {
+    return res.status(400).json({ error: "Email y password requeridos" });
+  }
+
+  const user = authenticateUser(email, password);
+  if (!user) {
+    return res.status(401).json({ error: "Credenciales inválidas" });
+  }
+
+  const token = issueToken(user.id);
+  return res.json({
+    token,
+    user,
+  });
 });
 
-app.post("/api/history/clear", (req, res) => {
-  clearHistory();
+app.get("/api/auth/me", requireAuth, (req, res) => {
+  res.json({ user: req.authUser });
+});
+
+app.post("/api/auth/logout", requireAuth, (req, res) => {
+  const token = getAuthToken(req);
+  if (token) revokeToken(token);
   res.json({ ok: true });
 });
 
-const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const telegram = createTelegramService({ token: TELEGRAM_TOKEN });
+app.get("/api/auth/users", requireAuth, requireAdmin, (req, res) => {
+  res.json(listUsers());
+});
+
+app.post("/api/auth/users", requireAuth, requireAdmin, (req, res) => {
+  try {
+    const user = createUser(req.body || {});
+    res.json({ ok: true, user });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.put("/api/auth/users/:id", requireAuth, requireAdmin, (req, res) => {
+  const updated = updateUser(req.params.id, req.body || {});
+  if (!updated) {
+    return res.status(404).json({ error: "Usuario no encontrado" });
+  }
+  return res.json({ ok: true, user: updated });
+});
+
+app.delete("/api/auth/users/:id", requireAuth, requireAdmin, (req, res) => {
+  const deleted = deleteUser(req.params.id);
+  if (!deleted) {
+    return res.status(404).json({ error: "Usuario no encontrado" });
+  }
+  return res.json({ ok: true });
+});
+
+app.get("/api/bots", requireAuth, requireAdmin, (req, res) => {
+  res.json({ bots: listBots() });
+});
+
+app.post("/api/bots", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const bot = createBot(req.body || {});
+    const webhookStatus = await registerTelegramWebhook(bot);
+    const warning = webhookStatus.ok || webhookStatus.skipped
+      ? null
+      : `No se pudo registrar el webhook: ${webhookStatus.message || webhookStatus.reason}`;
+    res.json({ ok: true, bot, webhook: webhookStatus, warning });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.get("/api/bots/:botId", requireAuth, requireAdmin, (req, res) => {
+  const bot = getBotById(req.params.botId);
+  if (!bot) {
+    return res.status(404).json({ error: "Bot no encontrado" });
+  }
+  return res.json({ bot });
+});
+
+app.put("/api/bots/:botId", requireAuth, requireAdmin, async (req, res) => {
+  const bot = updateBot(req.params.botId, req.body || {});
+  if (!bot) {
+    return res.status(404).json({ error: "Bot no encontrado" });
+  }
+  const webhookStatus = await registerTelegramWebhook(bot);
+  const warning = webhookStatus.ok || webhookStatus.skipped
+    ? null
+    : `No se pudo registrar el webhook: ${webhookStatus.message || webhookStatus.reason}`;
+  return res.json({ ok: true, bot, webhook: webhookStatus, warning });
+});
+
+app.delete("/api/bots/:botId", requireAuth, requireAdmin, (req, res) => {
+  const deleted = deleteBot(req.params.botId);
+  if (!deleted) {
+    return res.status(404).json({ error: "Bot no encontrado" });
+  }
+  return res.json({ ok: true });
+});
+
+app.get("/api/history", (req, res) => {
+  res.json(getHistory(req.botId));
+});
+
+app.post("/api/history/clear", (req, res) => {
+  clearHistory(req.botId);
+  res.json({ ok: true });
+});
+
+const telegramClients = new Map();
+
+// Última pregunta/respuesta por (bot, chat) para asociar el feedback 👍/👎.
+const lastInteractionByChat = new Map();
+function interactionKey(botId, chatId) {
+  return `${botId}::${chatId}`;
+}
+
+// Preguntas de seguimiento sugeridas por (bot, chat), para resolver los botones.
+// Fallback para el último mensaje cuando no tenemos el message_id.
+const suggestedByChat = new Map();
+
+// Las sugerencias por (bot, chat, message_id) se guardan en un store PERSISTENTE
+// (data/followups.json), para que los botones de mensajes antiguos sigan
+// funcionando incluso después de reiniciar/redesplegar el contenedor. Ver
+// ./config/followUpStore.js (rememberFollowUps / getFollowUps).
+
+// Construye el teclado de la respuesta: botones de seguimiento (uno por fila)
+// + botones de feedback 👍/👎 + filas extra opcionales.
+function buildAnswerKeyboard(followUps = [], extraRows = []) {
+  const rows = [];
+  followUps.slice(0, 3).forEach((q, i) => {
+    rows.push([{ text: `❓ ${q}`.slice(0, 64), callback_data: `sg_${i}` }]);
+  });
+  rows.push([
+    { text: "👍 Útil", callback_data: "fb_up" },
+    { text: "👎 No me sirvió", callback_data: "fb_down" },
+  ]);
+  for (const row of extraRows) rows.push(row);
+  return { inline_keyboard: rows };
+}
+
+// Mantiene visible el indicador "escribiendo…" en Telegram (que dura ~5s)
+// reenviándolo cada 4s mientras se resuelve la promesa dada. Útil como feedback
+// y como prueba de que la acción llegó al servidor.
+function keepTyping(telegram, chatId, promise) {
+  telegram.sendChatAction(chatId, "typing").catch(() => {});
+  const interval = setInterval(() => {
+    telegram.sendChatAction(chatId, "typing").catch(() => {});
+  }, 4000);
+  return promise.finally(() => clearInterval(interval));
+}
+
+// Genera respuesta para una pregunta, sugiere seguimientos y la envía con
+// botones. Centraliza el flujo para texto libre y para los callbacks.
+async function answerAndSend({ telegram, bot, resolvedBotId, chatId, question, context, documents, extraRows = [] }) {
+  const reply = await composeResponse({
+    incomingText: question,
+    chatId: String(chatId),
+    context: context ?? getContextState(resolvedBotId),
+    documents: documents ?? listDocuments(resolvedBotId),
+    botId: resolvedBotId,
+    claudeApiKey: bot?.claudeApiKey || "",
+  });
+  const answerText = applyCorrections(reply ?? "No pude obtener la información.");
+
+  lastInteractionByChat.set(interactionKey(resolvedBotId, String(chatId)), {
+    question,
+    answer: answerText,
+  });
+
+  // Generar preguntas de seguimiento (no bloquea si falla).
+  let followUps = [];
+  try {
+    followUps = await suggestFollowUps({
+      question,
+      answer: answerText,
+      botId: resolvedBotId,
+      claudeApiKey: bot?.claudeApiKey || "",
+    });
+  } catch {
+    followUps = [];
+  }
+  suggestedByChat.set(interactionKey(resolvedBotId, String(chatId)), followUps);
+
+  const sent = await telegram.sendMessage(chatId, answerText, {
+    reply_markup: buildAnswerKeyboard(followUps, extraRows),
+  });
+  // Asociar las sugerencias al mensaje recién enviado para que sus botones
+  // resuelvan siempre la pregunta correcta, sin importar cuántas respuestas
+  // posteriores haya (y sobreviviendo a reinicios, vía store persistente).
+  const sentMessageId = sent?.result?.message_id;
+  if (sentMessageId != null && followUps.length) {
+    rememberFollowUps({
+      botId: resolvedBotId,
+      chatId: String(chatId),
+      messageId: sentMessageId,
+      followUps,
+    });
+  }
+  return answerText;
+}
+
+function resolveBotId(req) {
+  const fromParams = req.params?.botId;
+  const fromHeader = req.header("x-bot-id");
+  const fromQuery = req.query?.botId;
+  return normalizeBotId(fromParams || fromHeader || fromQuery || DEFAULT_BOT_ID);
+}
+
+function getTelegramForBot(bot) {
+  const token = String(bot?.telegramToken || "").trim();
+  if (!token) {
+    return createTelegramService({ token: null });
+  }
+  if (telegramClients.has(token)) {
+    return telegramClients.get(token);
+  }
+  const client = createTelegramService({ token });
+  telegramClients.set(token, client);
+  return client;
+}
+
+async function registerTelegramWebhook(bot) {
+  const token = String(bot?.telegramToken || "").trim();
+  const base = String(process.env.WEBHOOK_BASE || "").trim();
+
+  if (!token) {
+    return { ok: false, skipped: true, reason: "missing_token" };
+  }
+  if (!base) {
+    return { ok: false, skipped: true, reason: "missing_webhook_base" };
+  }
+
+  const normalizedBase = base.replace(/\/+$/, "");
+  if (!isHttpsUrl(normalizedBase)) {
+    return { ok: false, skipped: true, reason: "webhook_base_not_https" };
+  }
+
+  const webhookUrl = `${normalizedBase}/webhook/${encodeURIComponent(bot.id)}`;
+
+  try {
+    const response = await axios.post(
+      `https://api.telegram.org/bot${token}/setWebhook`,
+      new URLSearchParams({ url: webhookUrl }),
+      { headers: { "Content-Type": "application/x-www-form-urlencoded" } }
+    );
+    return { ok: true, webhookUrl, response: response.data };
+  } catch (error) {
+    const message = error?.response?.data?.description || error?.message || "Error setWebhook";
+    return { ok: false, skipped: false, reason: "set_webhook_failed", message };
+  }
+}
+
+function getAuthToken(req) {
+  const header = String(req.header("authorization") || "").trim();
+  if (header.toLowerCase().startsWith("bearer ")) {
+    return header.slice(7).trim();
+  }
+  return String(req.header("x-auth-token") || "").trim();
+}
+
+function requireAuth(req, res, next) {
+  if (!isAuthEnabled()) return next();
+  const token = getAuthToken(req);
+  if (!token) {
+    return res.status(401).json({ error: "No autorizado" });
+  }
+  const user = validateToken(token);
+  if (!user) {
+    return res.status(401).json({ error: "Token inválido" });
+  }
+  req.authUser = user;
+  return next();
+}
+
+function requireAdmin(req, res, next) {
+  if (!req.authUser) {
+    return res.status(401).json({ error: "No autorizado" });
+  }
+  if (req.authUser.role !== "admin") {
+    return res.status(403).json({ error: "Permisos insuficientes" });
+  }
+  return next();
+}
+
+function requireBotAccess(req, res, next) {
+  if (!req.authUser) {
+    return res.status(401).json({ error: "No autorizado" });
+  }
+  if (req.authUser.role === "admin") return next();
+  const botId = req.botId || DEFAULT_BOT_ID;
+  const allowed = Array.isArray(req.authUser.botIds) && req.authUser.botIds.includes(botId);
+  if (!allowed) {
+    return res.status(403).json({ error: "Sin acceso a este bot" });
+  }
+  return next();
+}
 
 const RECENT_INGEST_MINUTES = Number.parseInt(
   process.env.DOCUMENT_INGEST_RECENT_MINUTES || "15",
@@ -158,11 +474,11 @@ function isPendingIngest(doc) {
   return status === "uploaded" || status === "processing" || status === "extracting";
 }
 
-async function waitForRecentIngestion({ timeoutMs = DEFAULT_INGEST_WAIT_MS, intervalMs = 300 } = {}) {
+async function waitForRecentIngestion({ botId, timeoutMs = DEFAULT_INGEST_WAIT_MS, intervalMs = 300 } = {}) {
   const started = Date.now();
   let lastPendingCount = 0;
   while (Date.now() - started < timeoutMs) {
-    const docs = listDocuments();
+    const docs = listDocuments(botId);
     const pending = docs.filter((doc) => isRecentlyCreated(doc) && isPendingIngest(doc));
     lastPendingCount = pending.length;
     if (!lastPendingCount) {
@@ -192,9 +508,11 @@ function resolveExtension(originalName, mimetype) {
   return EXT_BY_MIME[normalized] || "";
 }
 
-function telegramNotConfigured(res) {
+function telegramNotConfigured(res, botId = null) {
   res.status(500).json({
-    error: "TELEGRAM_BOT_TOKEN is not set",
+    error: botId
+      ? `Telegram token no configurado para bot ${botId}`
+      : "TELEGRAM_BOT_TOKEN is not set",
   });
 }
 
@@ -350,8 +668,8 @@ function stripChunksForClient(doc) {
   return rest;
 }
 
-function listDocumentsForClient() {
-  return listDocuments().map(stripChunksForClient);
+function listDocumentsForClient(botId) {
+  return listDocuments(botId).map(stripChunksForClient);
 }
 
 async function indexDocumentEmbeddings(document, text, options = {}) {
@@ -359,6 +677,7 @@ async function indexDocumentEmbeddings(document, text, options = {}) {
     return;
   }
   try {
+    const resolvedBotId = options.botId || document?.botId;
     const descriptors = chunkByStructure({
       extractedText: text,
       mimetype: document?.mimetype,
@@ -369,11 +688,17 @@ async function indexDocumentEmbeddings(document, text, options = {}) {
     });
 
     const chunks = Array.isArray(descriptors) && descriptors.length
-      ? await embedChunkDescriptors(descriptors)
-      : await embedChunks(chunkText(text));
+      ? await embedChunkDescriptors(descriptors, {
+          botId: resolvedBotId,
+          apiKey: options.claudeApiKey,
+        })
+      : await embedChunks(chunkText(text), null, {
+          botId: resolvedBotId,
+          apiKey: options.claudeApiKey,
+        });
 
     if (chunks.length) {
-      updateDocument(document.id, { chunks });
+      updateDocument(document.id, { chunks }, resolvedBotId);
     }
   } catch (error) {
     console.error("Error generando embeddings", error);
@@ -452,13 +777,21 @@ async function crawlWebsite({ startUrl, maxDepth, maxPages }) {
   return results;
 }
 
-app.post("/webhook", async (req, res) => {
+async function handleWebhook(req, res, botId) {
+  const resolvedBotId = normalizeBotId(botId || DEFAULT_BOT_ID);
+  const bot = getBotById(resolvedBotId);
+  if (!bot) {
+    return res.status(404).json({ error: "Bot no encontrado" });
+  }
+
+  const telegram = getTelegramForBot(bot);
   if (!telegram.isConfigured) {
     return telegramNotConfigured(res);
   }
 
   const update = req.body;
-  
+  console.log(`[DIAG webhook] ${update.callback_query ? "CALLBACK data=" + update.callback_query.data + " msg=" + update.callback_query.message?.message_id : update.message ? "MSG text=" + String(update.message.text || "").slice(0, 30) : "OTHER keys=" + Object.keys(update || {}).join(",")}`);
+
   // Manejar callback queries (botones de encuestas/quizzes)
   if (update.callback_query) {
     const callbackQuery = update.callback_query;
@@ -466,7 +799,7 @@ app.post("/webhook", async (req, res) => {
     const userId = callbackQuery.from.id;
     const chatId = callbackQuery.message.chat.id;
     const messageId = callbackQuery.message.message_id;
-    
+
     try {
       // Respuestas de encuestas/quizzes
       if (data.startsWith("survey_")) {
@@ -474,13 +807,13 @@ app.post("/webhook", async (req, res) => {
         if (data.startsWith("survey_start_")) {
           const surveyId = data.slice("survey_start_".length);
           await telegram.answerCallbackQuery(callbackQuery.id, { text: "Iniciando..." });
-          await startSurvey(telegram, userId, chatId, surveyId, messageId);
+          await startSurvey(telegram, userId, chatId, surveyId, messageId, resolvedBotId);
         } else if (data.startsWith("survey_later_")) {
           await telegram.answerCallbackQuery(callbackQuery.id, { text: "Puedes responder cuando quieras" });
         } else if (data.startsWith("survey_leaderboard_")) {
           const surveyId = data.slice("survey_leaderboard_".length);
           await telegram.answerCallbackQuery(callbackQuery.id);
-          await showLeaderboard(telegram, chatId, surveyId);
+          await showLeaderboard(telegram, chatId, surveyId, resolvedBotId);
         } else if (data.startsWith("survey_answer_")) {
           // Format: survey_answer_{sessionId}_{questionIndex}_{answer}
           // sessionId puede incluir '_' (ej: session_abcd1234), por eso usamos regex
@@ -497,7 +830,7 @@ app.post("/webhook", async (req, res) => {
           const parsedAnswer = Number.isNaN(Number(answer)) ? answer : Number.parseInt(answer, 10);
 
           await telegram.answerCallbackQuery(callbackQuery.id);
-          await handleSurveyAnswer(telegram, userId, chatId, sessionId, questionIndex, parsedAnswer);
+          await handleSurveyAnswer(telegram, userId, chatId, sessionId, questionIndex, parsedAnswer, resolvedBotId);
         } else if (data.startsWith("survey_toggle_")) {
           // Format: survey_toggle_{sessionId}_{questionIndex}_{optionIndex}
           const match = data.match(/^survey_toggle_(.+)_(\d+)_(\d+)$/);
@@ -512,7 +845,7 @@ app.post("/webhook", async (req, res) => {
           console.log("[survey-toggle] sessionId:", sessionId, "questionIndex:", questionIndex, "optionIndex:", optionIndex);
 
           await telegram.answerCallbackQuery(callbackQuery.id);
-          await handleMultipleChoiceToggle(telegram, userId, chatId, sessionId, questionIndex, optionIndex, messageId);
+          await handleMultipleChoiceToggle(telegram, userId, chatId, sessionId, questionIndex, optionIndex, messageId, resolvedBotId);
         } else if (data.startsWith("survey_confirm_")) {
           // Format: survey_confirm_{sessionId}_{questionIndex}
           const match = data.match(/^survey_confirm_(.+)_(\d+)$/);
@@ -527,11 +860,11 @@ app.post("/webhook", async (req, res) => {
 
           // Obtener las respuestas seleccionadas de la sesión
           const { getSession } = await import("./config/surveyStore.js");
-          const session = getSession(sessionId);
+          const session = getSession(sessionId, resolvedBotId);
           const answers = session?.answers?.[questionIndex] || [];
 
           await telegram.answerCallbackQuery(callbackQuery.id, { text: "Respuesta guardada" });
-          await handleSurveyAnswer(telegram, userId, chatId, sessionId, questionIndex, answers);
+          await handleSurveyAnswer(telegram, userId, chatId, sessionId, questionIndex, answers, resolvedBotId);
         } else if (data.startsWith("survey_skip_")) {
           // Format: survey_skip_{sessionId}_{questionIndex}
           const match = data.match(/^survey_skip_(.+)_(\d+)$/);
@@ -545,12 +878,108 @@ app.post("/webhook", async (req, res) => {
           console.log("[survey-skip] sessionId:", sessionId, "questionIndex:", questionIndex);
 
           await telegram.answerCallbackQuery(callbackQuery.id, { text: "Pregunta omitida" });
-          await handleSurveyAnswer(telegram, userId, chatId, sessionId, questionIndex, null);
+          await handleSurveyAnswer(telegram, userId, chatId, sessionId, questionIndex, null, resolvedBotId);
         }
         
         return res.sendStatus(200);
       }
-      
+
+      // Feedback 👍/👎 sobre una respuesta del bot.
+      if (data === "fb_up" || data === "fb_down") {
+        const rating = data === "fb_up" ? "up" : "down";
+        const stored = lastInteractionByChat.get(interactionKey(resolvedBotId, chatId));
+        try {
+          await recordFeedback({
+            botId: resolvedBotId,
+            chatId,
+            question: stored?.question || "(desconocida)",
+            answer: stored?.answer || callbackQuery.message?.text || "",
+            rating,
+          });
+        } catch (fbError) {
+          console.error("No se pudo guardar feedback", fbError);
+        }
+        await telegram.answerCallbackQuery(callbackQuery.id, {
+          text: rating === "up" ? "¡Gracias por tu valoración! 🙌" : "Gracias, lo tendremos en cuenta para mejorar 🙏",
+        });
+        // Quitar los botones para que no se vote dos veces.
+        try {
+          await telegram.editMessageReplyMarkup(
+            { inline_keyboard: [] },
+            { chat_id: chatId, message_id: messageId }
+          );
+        } catch {
+          // Ignorar si no se puede editar.
+        }
+        return res.sendStatus(200);
+      }
+
+      // Botones del menú de programas: responder con la info del programa.
+      if (data.startsWith("prog_") && data !== "prog_menu") {
+        const program = getProgramById(data.slice("prog_".length));
+        await telegram.answerCallbackQuery(callbackQuery.id, {
+          text: program ? `Buscando info de ${program.label}...` : "Programa no encontrado",
+        });
+        if (program) {
+          telegram.sendChatAction(chatId, "typing").catch(() => {});
+          await answerAndSend({
+            telegram,
+            bot,
+            resolvedBotId,
+            chatId,
+            question: program.query,
+            extraRows: [[{ text: "⬅️ Ver otros programas", callback_data: "prog_menu" }]],
+          });
+        }
+        return res.sendStatus(200);
+      }
+
+      // Botones de preguntas de seguimiento sugeridas (sg_0, sg_1, sg_2).
+      if (/^sg_\d+$/.test(data)) {
+        const index = Number.parseInt(data.slice(3), 10);
+        // Resolver con las sugerencias del MENSAJE pulsado (por message_id, desde
+        // el store persistente). Como respaldo, el último set por chat en memoria.
+        const stored =
+          getFollowUps({
+            botId: resolvedBotId,
+            chatId: String(chatId),
+            messageId,
+          }) || suggestedByChat.get(interactionKey(resolvedBotId, String(chatId)));
+        const followUp = Array.isArray(stored) ? stored[index] : null;
+        await telegram.answerCallbackQuery(callbackQuery.id, {
+          text: followUp ? "Buscando..." : "Sugerencia no disponible",
+        });
+        // Responder OK a Telegram de INMEDIATO; generar y enviar la respuesta en
+        // segundo plano. Si no, una respuesta lenta/larga mantiene abierta la
+        // conexión del webhook y Telegram empieza a descartar las pulsaciones
+        // siguientes del usuario.
+        res.sendStatus(200);
+        if (followUp) {
+          // "escribiendo…" persistente hasta que salga la respuesta.
+          keepTyping(
+            telegram,
+            chatId,
+            answerAndSend({
+              telegram,
+              bot,
+              resolvedBotId,
+              chatId,
+              question: followUp,
+            })
+          ).catch((e) => console.error("answerAndSend (sg) bg error", e?.message || e));
+        }
+        return;
+      }
+
+      // Volver al menú de programas.
+      if (data === "prog_menu") {
+        await telegram.answerCallbackQuery(callbackQuery.id);
+        await telegram.sendMessage(chatId, "Nuestros programas de ingeniería: 👇", {
+          reply_markup: buildProgramsKeyboard(),
+        });
+        return res.sendStatus(200);
+      }
+
       await telegram.answerCallbackQuery(callbackQuery.id);
       return res.sendStatus(200);
     } catch (error) {
@@ -574,47 +1003,146 @@ app.post("/webhook", async (req, res) => {
 
   try {
     // Persist user info (only users who wrote to the bot are stored).
-    upsertTelegramUser(getTelegramUserInfo(message));
+    upsertTelegramUser({ ...getTelegramUserInfo(message), botId: resolvedBotId });
     
     const userId = message.from.id;
     const chatId = message.chat.id;
-    
+
+    // Comandos /start y /ayuda: mensaje de bienvenida con orientación y menú de programas.
+    if (/^\/(start|ayuda|help|menu)\b/i.test(text)) {
+      const botName = bot?.name || "Asistente de Ingeniería";
+      const welcome = [
+        `¡Hola! 👋 Soy el ${botName} de la Universidad de San Buenaventura Cali.`,
+        "",
+        "Puedo ayudarte con información sobre la Facultad de Ingeniería. Por ejemplo:",
+        "• Horarios y materias de un profesor (ej: \"horario del profe Acosta\")",
+        "• Programas, costos y becas",
+        "• Directivas y contactos de la facultad",
+        "",
+        "Toca un programa para conocerlo, o escríbeme tu pregunta. 👇",
+        "",
+        "Comandos: /programas · /nueva (reiniciar) · /ayuda",
+      ].join("\n");
+      await telegram.sendMessage(chatId, welcome, {
+        reply_markup: buildProgramsKeyboard(),
+      });
+      return res.sendStatus(200);
+    }
+
+    // Comando /programas: muestra el menú de programas con botones.
+    if (/^\/programas?\b/i.test(text)) {
+      await telegram.sendMessage(
+        chatId,
+        "Estos son nuestros programas de ingeniería. Toca el que te interese para conocer más: 👇",
+        { reply_markup: buildProgramsKeyboard() }
+      );
+      return res.sendStatus(200);
+    }
+
+    // Comando para reiniciar la conversación / borrar la memoria del chat.
+    if (/^\/(reset|nueva|nuevo|limpiar|borrar|olvidar)\b/i.test(text)) {
+      clearConversation(resolvedBotId, String(chatId));
+      await telegram.sendMessage(
+        chatId,
+        "Listo, empecé una conversación nueva. Olvidé lo que hablamos antes. ¿En qué te ayudo?"
+      );
+      return res.sendStatus(200);
+    }
+
     // Verificar si el usuario está respondiendo una pregunta de texto de encuesta
-    const handledBySurvey = await handleTextAnswer(telegram, userId, chatId, text);
+    const handledBySurvey = await handleTextAnswer(telegram, userId, chatId, text, resolvedBotId);
     if (handledBySurvey) {
       return res.sendStatus(200);
     }
 
-    const ingestStatus = await waitForRecentIngestion();
-    const baseContext = getContextState();
-    const ingestNote = ingestStatus.pendingCount
-      ? `Nota: aún estoy procesando ${ingestStatus.pendingCount} documento(s) subido(s) recientemente. Si la respuesta no incluye información nueva, pide al usuario que reintente en 1-2 minutos.`
-      : "";
-
-    const payload = {
-      incomingText: text,
-      chatId: String(message.chat.id),
-      context: {
-        ...baseContext,
-        additionalNotes: [baseContext?.additionalNotes, ingestNote]
-          .filter(Boolean)
-          .join("\n"),
-      },
-      documents: listDocuments(),
-    };
-
-    const reply = await composeResponse(payload);
-    await telegram.sendMessage(message.chat.id, reply ?? "Got it!");
-    res.sendStatus(200);
-  } catch (error) {
-    console.error("Webhook error", error);
-    try {
-      await telegram.sendMessage(message.chat.id, "Lo siento, hubo un problema al generar la respuesta.");
-    } catch (sendError) {
-      console.error("No se pudo enviar mensaje de error a Telegram", sendError);
+    // Detección de intención: si preguntan por los programas EN GENERAL (no por
+    // uno específico ni por un detalle), mostrar automáticamente los botones.
+    {
+      const norm = text
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "");
+      const asksProgramsList =
+        /\b(que|cuales|cuantos)\b[^?]*\b(programas?|carreras?|pregrados?|ingenierias?)\b/.test(norm) ||
+        /\b(programas?|carreras?|pregrados?)\b[^?]*\b(tienen|hay|ofrecen|ofrece|disponibles?|estudiar)\b/.test(norm) ||
+        /\b(que|cuales)\b[^?]*\b(puedo|se puede|podria)\b[^?]*\bestudiar\b/.test(norm) ||
+        /\boferta academica\b/.test(norm) ||
+        /\bque (puedo|se puede) estudiar\b/.test(norm);
+      const namesSpecificProgram =
+        /\b(sistemas|industrial|electronica|biomedica|multimedia|agroindustrial)\b/.test(norm);
+      const wantsDetails =
+        /\b(costo|costos|precio|valor|vale|cuesta|horario|pensum|materia|requisito|inscri|matricula|beca|semestre)\b/.test(norm);
+      if (asksProgramsList && !namesSpecificProgram && !wantsDetails) {
+        await telegram.sendMessage(
+          chatId,
+          "En la Facultad de Ingeniería de la USB Cali tenemos estos programas de pregrado. Toca el que te interese para conocer más: 👇",
+          { reply_markup: buildProgramsKeyboard() }
+        );
+        return res.sendStatus(200);
+      }
     }
+
+    // Responder OK a Telegram de INMEDIATO y generar la respuesta en segundo
+    // plano (con "escribiendo…" persistente). Telegram entrega los updates en
+    // orden esperando este OK; si el handler bloquea generando la respuesta (o
+    // esperando la ingesta de documentos, hasta 8s), las pulsaciones de botones
+    // siguientes se encolan y se descartan.
     res.sendStatus(200);
+
+    keepTyping(
+      telegram,
+      chatId,
+      (async () => {
+        const ingestStatus = await waitForRecentIngestion({ botId: resolvedBotId });
+        const baseContext = getContextState(resolvedBotId);
+        const ingestNote = ingestStatus.pendingCount
+          ? `Nota: aún estoy procesando ${ingestStatus.pendingCount} documento(s) subido(s) recientemente. Si la respuesta no incluye información nueva, pide al usuario que reintente en 1-2 minutos.`
+          : "";
+
+        const context = {
+          ...baseContext,
+          additionalNotes: [baseContext?.additionalNotes, ingestNote]
+            .filter(Boolean)
+            .join("\n"),
+        };
+
+        await answerAndSend({
+          telegram,
+          bot,
+          resolvedBotId,
+          chatId,
+          question: text,
+          context,
+          documents: listDocuments(resolvedBotId),
+        });
+      })()
+    ).catch(async (error) => {
+      console.error("Webhook bg error", error);
+      try {
+        await recordError("webhook", error?.message || "Error webhook", {
+          botId: resolvedBotId,
+          context: { chatId: message?.chat?.id },
+        });
+      } catch {}
+      telegram
+        .sendMessage(message.chat.id, "Lo siento, hubo un problema al generar la respuesta.")
+        .catch((e) => console.error("No se pudo enviar mensaje de error a Telegram", e));
+    });
+    return;
+  } catch (error) {
+    console.error("Webhook error (sync)", error);
+    try {
+      res.sendStatus(200);
+    } catch {}
   }
+}
+
+app.post("/webhook/:botId", async (req, res) => {
+  await handleWebhook(req, res, req.params.botId);
+});
+
+app.post("/webhook", async (req, res) => {
+  await handleWebhook(req, res, DEFAULT_BOT_ID);
 });
 
 function parseBoolean(value) {
@@ -650,8 +1178,15 @@ function isHttpsUrl(value) {
 }
 
 app.post("/send-broadcast", broadcastUpload.single("media"), async (req, res) => {
+  const resolvedBotId = resolveBotId(req);
+  const bot = getBotById(resolvedBotId);
+  if (!bot) {
+    return res.status(404).json({ error: "Bot no encontrado" });
+  }
+
+  const telegram = getTelegramForBot(bot);
   if (!telegram.isConfigured) {
-    return telegramNotConfigured(res);
+    return telegramNotConfigured(res, bot.id);
   }
 
   // Same-domain panel: if the browser sends Origin, enforce it.
@@ -730,7 +1265,7 @@ app.post("/send-broadcast", broadcastUpload.single("media"), async (req, res) =>
     }
   }
 
-  const allUsers = listTelegramUsers();
+  const allUsers = listTelegramUsers(resolvedBotId);
   const usersByChatId = new Map(allUsers.map((u) => [String(u.chatId), u]));
 
   const targets = sendToAll
@@ -788,10 +1323,15 @@ app.post("/send-broadcast", broadcastUpload.single("media"), async (req, res) =>
         };
         failures.push(info);
 
+        await recordError("telegram_send", classified.description || "Error enviando mensaje", {
+          botId: resolvedBotId,
+          context: info,
+        });
+
         if (classified.reason === "blocked") {
-          markTelegramUserBlocked(chatId, classified.description);
+          markTelegramUserBlocked(chatId, classified.description, resolvedBotId);
         } else {
-          markTelegramUserError(chatId, classified.description);
+          markTelegramUserError(chatId, classified.description, resolvedBotId);
         }
       }
 
@@ -839,8 +1379,8 @@ app.post("/send-broadcast", broadcastUpload.single("media"), async (req, res) =>
 
 app.get("/api/config", (req, res) => {
   res.json({
-    context: getContextState(),
-    documents: listDocumentsForClient(),
+    context: getContextState(req.botId),
+    documents: listDocumentsForClient(req.botId),
     limits: {
       documentUploadMaxMB: DOCUMENT_UPLOAD_MAX_MB,
     },
@@ -849,20 +1389,23 @@ app.get("/api/config", (req, res) => {
 
 // List Telegram users
 app.get('/api/users', (req, res) => {
-  res.json(listTelegramUsers());
+  res.json(listTelegramUsers(req.botId));
 });
 
 // Delete a Telegram user from store
 app.delete('/api/users/:chatId', (req, res) => {
   const chatId = req.params.chatId;
-  const removed = removeTelegramUser ? removeTelegramUser(chatId) : false;
+  const removed = removeTelegramUser ? removeTelegramUser(chatId, req.botId) : false;
   if (!removed) return res.status(404).json({ error: 'Usuario no encontrado' });
   res.json({ ok: true });
 });
 
 // Send a direct message to a single user
 app.post('/api/users/:chatId/message', async (req, res) => {
-  if (!telegram.isConfigured) return telegramNotConfigured(res);
+  const bot = getBotById(req.botId);
+  if (!bot) return res.status(404).json({ error: "Bot no encontrado" });
+  const telegram = getTelegramForBot(bot);
+  if (!telegram.isConfigured) return telegramNotConfigured(res, bot.id);
   const chatId = req.params.chatId;
   const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
   if (!text) return res.status(400).json({ error: 'Se requiere texto' });
@@ -871,8 +1414,8 @@ app.post('/api/users/:chatId/message', async (req, res) => {
     res.json({ ok: true });
   } catch (error) {
     const classified = classifyTelegramSendError(error);
-    if (classified.reason === 'blocked') markTelegramUserBlocked(chatId, classified.description);
-    else markTelegramUserError(chatId, classified.description);
+    if (classified.reason === 'blocked') markTelegramUserBlocked(chatId, classified.description, req.botId);
+    else markTelegramUserError(chatId, classified.description, req.botId);
     res.status(500).json({ error: classified.description || String(error?.message || 'Error') });
   }
 });
@@ -881,19 +1424,23 @@ app.post("/api/config/context", (req, res) => {
   const { activePrompt, additionalNotes, promptTemplate } = req.body;
 
   if (typeof activePrompt === "string") {
-    updatePrompt(activePrompt);
+    updatePrompt(req.botId, activePrompt);
   }
   if (typeof additionalNotes === "string") {
-    updateAdditionalNotes(additionalNotes);
+    updateAdditionalNotes(req.botId, additionalNotes);
   }
 
-  res.json(getContextState());
+  res.json(getContextState(req.botId));
 });
 
 app.post(
   "/api/documents",
   upload.single("document"),
   async (req, res) => {
+    const bot = getBotById(req.botId);
+    if (!bot) {
+      return res.status(404).json({ error: "Bot no encontrado." });
+    }
     // debugging/logging: help diagnose proxy vs backend upload problems
     console.log(`[uploads] incoming /api/documents from ip=${req.ip || req.socket?.remoteAddress || 'unknown'} content-length=${req.headers['content-length'] || 'n/a'} content-type=${req.headers['content-type'] || 'n/a'}`);
 
@@ -926,19 +1473,23 @@ app.post(
       size: req.file.size,
       mimetype: req.file.mimetype,
       summary,
-    });
+    }, req.botId);
 
-    processDocument(document).catch((processError) => {
+    processDocument(document, { botId: req.botId, claudeApiKey: bot.claudeApiKey }).catch((processError) => {
       console.error("Error procesando documento", processError);
     });
 
-    const docsForClient = listDocumentsForClient();
+    const docsForClient = listDocumentsForClient(req.botId);
     console.log(`[uploads] finished /api/documents — saved=${document.originalName || document.filename} size=${document.size} documentsReturned=${(Array.isArray(docsForClient) && docsForClient.length) || 0}`);
     res.json(docsForClient);
   }
 );
 
 app.post("/api/documents/url", async (req, res) => {
+  const bot = getBotById(req.botId);
+  if (!bot) {
+    return res.status(404).json({ error: "Bot no encontrado." });
+  }
   const { url, summary } = req.body;
   if (typeof url !== "string" || !url.trim()) {
     return res.status(400).json({ error: "Se requiere una URL válida." });
@@ -1014,13 +1565,13 @@ app.post("/api/documents/url", async (req, res) => {
       mimetype: normalizedType || contentType,
       summary: typeof summary === "string" ? summary : "",
       sourceUrl: normalizedUrl.toString(),
-    });
+    }, req.botId);
 
-    processDocument(document).catch((processError) => {
+    processDocument(document, { botId: req.botId, claudeApiKey: bot.claudeApiKey }).catch((processError) => {
       console.error("Error procesando documento", processError);
     });
 
-    res.json(listDocumentsForClient());
+    res.json(listDocumentsForClient(req.botId));
   } catch (error) {
     if (destination) {
       try {
@@ -1037,6 +1588,10 @@ app.post("/api/documents/url", async (req, res) => {
 });
 
 app.post("/api/documents/web", async (req, res) => {
+  const bot = getBotById(req.botId);
+  if (!bot) {
+    return res.status(404).json({ error: "Bot no encontrado." });
+  }
   const { url, summary, depth, maxPages } = req.body;
   if (typeof url !== "string" || !url.trim()) {
     return res.status(400).json({ error: "Se requiere una URL válida." });
@@ -1083,7 +1638,7 @@ app.post("/api/documents/web", async (req, res) => {
         mimetype: "text/html",
         summary: typeof summary === "string" ? summary : "",
         sourceUrl: normalizedUrl.toString(),
-      });
+      }, req.botId);
 
       const autoSummary = extractedText.slice(0, 400);
 
@@ -1094,11 +1649,15 @@ app.post("/api/documents/web", async (req, res) => {
         status: "ready",
         processedAt: new Date().toISOString(),
         error: null,
+      }, req.botId);
+
+      await indexDocumentEmbeddings(document, extractedText, {
+        htmlSections,
+        botId: req.botId,
+        claudeApiKey: bot.claudeApiKey,
       });
 
-      await indexDocumentEmbeddings(document, extractedText, { htmlSections });
-
-      return res.json(listDocumentsForClient());
+      return res.json(listDocumentsForClient(req.botId));
     }
 
     const pages = await crawlWebsite({
@@ -1126,7 +1685,7 @@ app.post("/api/documents/web", async (req, res) => {
       mimetype: "text/html",
       summary: typeof summary === "string" ? summary : "",
       sourceUrl: normalizedUrl.toString(),
-    });
+    }, req.botId);
 
     const autoSummary = trimmedText.slice(0, 400);
 
@@ -1137,11 +1696,15 @@ app.post("/api/documents/web", async (req, res) => {
       status: "ready",
       processedAt: new Date().toISOString(),
       error: null,
+    }, req.botId);
+
+    await indexDocumentEmbeddings(document, trimmedText, {
+      webPages: pages,
+      botId: req.botId,
+      claudeApiKey: bot.claudeApiKey,
     });
 
-    await indexDocumentEmbeddings(document, trimmedText, { webPages: pages });
-
-    res.json(listDocumentsForClient());
+    res.json(listDocumentsForClient(req.botId));
   } catch (error) {
     console.error("Error extrayendo página web", error);
     res.status(400).json({ error: error.message || "No se pudo extraer la página." });
@@ -1149,6 +1712,10 @@ app.post("/api/documents/web", async (req, res) => {
 });
 
 app.post("/api/documents/html", async (req, res) => {
+  const bot = getBotById(req.botId);
+  if (!bot) {
+    return res.status(404).json({ error: "Bot no encontrado." });
+  }
   const { html, summary, title } = req.body;
   if (typeof html !== "string" || !html.trim()) {
     return res.status(400).json({ error: "Se requiere HTML válido." });
@@ -1171,7 +1738,7 @@ app.post("/api/documents/html", async (req, res) => {
       mimetype: "text/html",
       summary: typeof summary === "string" ? summary : "",
       sourceUrl: null,
-    });
+    }, req.botId);
 
     const autoSummary = extractedText.slice(0, 400);
 
@@ -1182,11 +1749,15 @@ app.post("/api/documents/html", async (req, res) => {
       status: "ready",
       processedAt: new Date().toISOString(),
       error: null,
+    }, req.botId);
+
+    await indexDocumentEmbeddings(document, extractedText, {
+      htmlSections,
+      botId: req.botId,
+      claudeApiKey: bot.claudeApiKey,
     });
 
-    await indexDocumentEmbeddings(document, extractedText, { htmlSections });
-
-    res.json(listDocumentsForClient());
+    res.json(listDocumentsForClient(req.botId));
   } catch (error) {
     console.error("Error procesando HTML pegado", error);
     res.status(400).json({ error: error.message || "No se pudo procesar el HTML." });
@@ -1194,12 +1765,12 @@ app.post("/api/documents/html", async (req, res) => {
 });
 
 app.get("/api/documents", (req, res) => {
-  res.json(listDocumentsForClient());
+  res.json(listDocumentsForClient(req.botId));
 });
 
 app.post("/api/documents/:id/reprocess", async (req, res) => {
   const { id } = req.params;
-  const document = getDocumentById(id);
+  const document = getDocumentById(id, req.botId);
   if (!document) {
     return res.status(404).json({ error: "Documento no encontrado." });
   }
@@ -1210,16 +1781,21 @@ app.post("/api/documents/:id/reprocess", async (req, res) => {
       .json({ error: "Este documento no tiene archivo para reprocesar." });
   }
 
-  processDocument(document).catch((processError) => {
+  const bot = getBotById(req.botId);
+  if (!bot) {
+    return res.status(404).json({ error: "Bot no encontrado." });
+  }
+
+  processDocument(document, { botId: req.botId, claudeApiKey: bot.claudeApiKey }).catch((processError) => {
     console.error("Error reprocesando documento", processError);
   });
 
-  res.json(listDocumentsForClient());
+  res.json(listDocumentsForClient(req.botId));
 });
 
 app.delete("/api/documents/:id", async (req, res) => {
   const { id } = req.params;
-  const removed = removeDocument(id);
+  const removed = removeDocument(id, req.botId);
   if (!removed) {
     return res.status(404).json({ error: "Documento no encontrado." });
   }
@@ -1235,33 +1811,33 @@ app.delete("/api/documents/:id", async (req, res) => {
   // Eliminar del índice de vectores si está habilitado
   if (process.env.USE_VECTOR_INDEX === 'true') {
     try {
-      removeDocumentFromIndex(id);
+      removeDocumentFromIndex(id, req.botId);
       console.log(`✓ Documento ${id} eliminado del índice de vectores`);
     } catch (indexError) {
       console.error(`Error eliminando documento ${id} del índice:`, indexError);
     }
   }
 
-  res.json(listDocumentsForClient());
+  res.json(listDocumentsForClient(req.botId));
 });
 
 // API: Cache stats
 app.get("/api/cache/stats", (req, res) => {
-  res.json(getCacheStats());
+  res.json(getCacheStats(req.botId));
 });
 
 // API: Learning patterns
 app.get("/api/learning/stats", (req, res) => {
-  res.json(getLearningStats());
+  res.json(getLearningStats(req.botId));
 });
 
 app.get("/api/learning/patterns", (req, res) => {
-  res.json(getLearningPatterns());
+  res.json(getLearningPatterns(req.botId));
 });
 
 app.put("/api/learning/patterns/:id", (req, res) => {
   try {
-    const updated = updateLearningPattern(req.params.id, req.body);
+    const updated = updateLearningPattern(req.params.id, req.body, req.botId);
     res.json(updated);
   } catch (error) {
     res.status(404).json({ error: error.message });
@@ -1269,7 +1845,7 @@ app.put("/api/learning/patterns/:id", (req, res) => {
 });
 
 app.delete("/api/learning/patterns/:id", (req, res) => {
-  const deleted = deleteLearningPattern(req.params.id);
+  const deleted = deleteLearningPattern(req.params.id, req.botId);
   if (!deleted) {
     return res.status(404).json({ error: "Patrón no encontrado" });
   }
@@ -1278,7 +1854,7 @@ app.delete("/api/learning/patterns/:id", (req, res) => {
 
 // API: Profile stats
 app.get("/api/profiles/stats", (req, res) => {
-  const users = listTelegramUsers();
+  const users = listTelegramUsers(req.botId);
   res.json({
     totalUsers: users.length,
     usersWithNames: users.filter(u => u.name).length,
@@ -1293,13 +1869,13 @@ app.get("/api/profiles/stats", (req, res) => {
 // API: User history
 app.get("/api/users/:userId/history", (req, res) => {
   const { userId } = req.params;
-  const history = getHistoryByChatId(userId);
+  const history = getHistoryByChatId(userId, 100, req.botId);
   res.json(history);
 });
 
 app.post("/api/users/:userId/history/clear", (req, res) => {
   const { userId } = req.params;
-  clearHistoryForChatId(userId);
+  clearHistoryForChatId(userId, req.botId);
   res.json({ ok: true });
 });
 
@@ -1307,13 +1883,13 @@ app.post("/api/users/:userId/history/clear", (req, res) => {
 app.post("/api/users/:userId/block", (req, res) => {
   const { blocked } = req.body;
   try {
-    const user = listTelegramUsers().find(u => String(u.id) === String(req.params.userId));
+    const user = listTelegramUsers(req.botId).find(u => String(u.id) === String(req.params.userId));
     if (!user) {
       return res.status(404).json({ error: "Usuario no encontrado" });
     }
     
     if (blocked) {
-      markTelegramUserBlocked(req.params.userId, true);
+      markTelegramUserBlocked(req.params.userId, true, req.botId);
     }
     
     res.json({
@@ -1340,7 +1916,7 @@ app.post("/api/users/:userId/block", (req, res) => {
 // Obtener todas las FAQs
 app.get("/api/faqs", (req, res) => {
   try {
-    const faqs = getAllFAQs();
+    const faqs = getAllFAQs(req.botId);
     res.json(faqs);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -1350,7 +1926,7 @@ app.get("/api/faqs", (req, res) => {
 // Obtener estadísticas del FAQ cache
 app.get("/api/faqs/stats", (req, res) => {
   try {
-    const stats = getFAQStats();
+    const stats = getFAQStats(req.botId);
     res.json(stats);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -1361,7 +1937,7 @@ app.get("/api/faqs/stats", (req, res) => {
 app.get("/api/faqs/top", (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 10;
-    const topFAQs = getTopFAQs(limit);
+    const topFAQs = getTopFAQs(limit, req.botId);
     res.json(topFAQs);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -1372,7 +1948,7 @@ app.get("/api/faqs/top", (req, res) => {
 app.get("/api/faqs/category/:category", (req, res) => {
   try {
     const { category } = req.params;
-    const faqs = getFAQsByCategory(category);
+    const faqs = getFAQsByCategory(category, req.botId);
     res.json(faqs);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -1384,7 +1960,7 @@ app.put("/api/faqs/:id", (req, res) => {
   try {
     const { id } = req.params;
     const updates = req.body;
-    const updated = updateFAQ(id, updates);
+    const updated = updateFAQ(id, updates, req.botId);
     if (!updated) {
       return res.status(404).json({ error: "FAQ no encontrada" });
     }
@@ -1398,7 +1974,7 @@ app.put("/api/faqs/:id", (req, res) => {
 app.delete("/api/faqs/:id", (req, res) => {
   try {
     const { id } = req.params;
-    const deleted = deleteFAQ(id);
+    const deleted = deleteFAQ(id, req.botId);
     if (!deleted) {
       return res.status(404).json({ error: "FAQ no encontrada" });
     }
@@ -1413,7 +1989,7 @@ app.patch("/api/faqs/:id/toggle", (req, res) => {
   try {
     const { id } = req.params;
     const { enabled } = req.body;
-    const updated = toggleFAQ(id, enabled);
+    const updated = toggleFAQ(id, enabled, req.botId);
     if (!updated) {
       return res.status(404).json({ error: "FAQ no encontrada" });
     }
@@ -1436,7 +2012,7 @@ app.get("/api/faq-categories", (req, res) => {
 // Obtener estadísticas del embedding cache
 app.get("/api/embedding-cache/stats", (req, res) => {
   try {
-    const stats = getEmbeddingCacheStats();
+    const stats = getEmbeddingCacheStats(req.botId);
     res.json(stats);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -1448,17 +2024,149 @@ app.post("/api/embedding-cache/clean", (req, res) => {
   try {
     const { maxAgeDays = 90 } = req.body;
     const maxAgeMs = maxAgeDays * 24 * 60 * 60 * 1000;
-    const result = cleanOldEmbeddings(maxAgeMs);
+    const result = cleanOldEmbeddings(maxAgeMs, req.botId);
     res.json(result);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
+// ============================================================================
+// API: Metrics and errors
+// ============================================================================
+
+app.get("/api/metrics/overview", (req, res) => {
+  const days = Number.parseInt(req.query.days || "7", 10);
+  const safeDays = Number.isFinite(days) && days > 0 ? Math.min(days, 60) : 7;
+  res.json(getMetricsOverview(req.botId, safeDays));
+});
+
+app.get("/api/metrics/questions/top", (req, res) => {
+  const limit = Number.parseInt(req.query.limit || "10", 10);
+  const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.min(limit, 50) : 10;
+  res.json({
+    botId: req.botId,
+    items: getTopQuestions(req.botId, safeLimit),
+  });
+});
+
+app.get("/api/errors/recent", (req, res) => {
+  const limit = Number.parseInt(req.query.limit || "100", 10);
+  const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.min(limit, 200) : 100;
+  res.json({
+    botId: req.botId,
+    items: getRecentErrors(req.botId, safeLimit),
+  });
+});
+
+// Feedback 👍/👎 de los usuarios sobre las respuestas del bot.
+app.get("/api/feedback", (req, res) => {
+  const rating = req.query.rating === "up" || req.query.rating === "down" ? req.query.rating : undefined;
+  const resolvedFilter =
+    req.query.resolved === "true" ? true : req.query.resolved === "false" ? false : undefined;
+  const limit = Number.parseInt(req.query.limit || "200", 10);
+  const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.min(limit, 500) : 200;
+  res.json({
+    botId: req.botId,
+    stats: getFeedbackStats(req.botId),
+    items: listFeedback(req.botId, { rating, resolved: resolvedFilter }).slice(0, safeLimit),
+  });
+});
+
+// Generar automáticamente una respuesta mejorada para un feedback 👎.
+// No publica nada: devuelve una sugerencia para que el admin la revise.
+app.post("/api/feedback/:id/regenerate", async (req, res) => {
+  try {
+    const entry = getFeedbackById(req.params.id, req.botId);
+    if (!entry) {
+      return res.status(404).json({ error: "Feedback no encontrado." });
+    }
+    const bot = getBotById(req.botId);
+    const suggestion = await suggestImprovedAnswer({
+      question: entry.question,
+      documents: listDocuments(req.botId),
+      context: getContextState(req.botId),
+      botId: req.botId,
+      claudeApiKey: bot?.claudeApiKey || "",
+    });
+    res.json({ ok: true, question: entry.question, ...suggestion });
+  } catch (error) {
+    console.error("regenerate error", error);
+    res.status(500).json({ error: error?.message || "Error generando sugerencia." });
+  }
+});
+
+// Aprobar una respuesta correcta: se guarda como FAQ confiable (con embedding)
+// para que el bot la sirva automáticamente a futuras preguntas similares, y se
+// marca el feedback como resuelto.
+app.post("/api/feedback/:id/resolve", async (req, res) => {
+  try {
+    const entry = getFeedbackById(req.params.id, req.botId);
+    if (!entry) {
+      return res.status(404).json({ error: "Feedback no encontrado." });
+    }
+    const answer = String(req.body?.answer || "").trim();
+    if (!answer) {
+      return res.status(400).json({ error: "La respuesta no puede estar vacía." });
+    }
+    const bot = getBotById(req.botId);
+
+    // Embedding de la pregunta para que el bot la recupere por similitud.
+    // getEmbedding usa OpenAI; sin apiKey explícita usa OPENAI_API_KEY del entorno.
+    let questionEmbedding = null;
+    try {
+      questionEmbedding = await getEmbedding(entry.question, { botId: req.botId });
+    } catch (embedError) {
+      console.error("resolve: fallo embedding", embedError);
+    }
+
+    if (questionEmbedding) {
+      upsertFAQ({
+        question: entry.question,
+        answer,
+        questionEmbedding,
+        category: "curated",
+        metadata: { source: "feedback_resolved", feedbackId: entry.id, curated: true },
+        botId: req.botId,
+      });
+    }
+
+    await markFeedbackResolved(req.params.id, req.botId, answer);
+    res.json({ ok: true, savedToFaq: Boolean(questionEmbedding) });
+  } catch (error) {
+    console.error("resolve error", error);
+    res.status(500).json({ error: error?.message || "Error guardando la respuesta." });
+  }
+});
+
+// Vacíos de conocimiento: preguntas que el bot no pudo responder.
+app.get("/api/knowledge-gaps", (req, res) => {
+  res.json({
+    botId: req.botId,
+    stats: getKnowledgeGapsStats(req.botId),
+    byCategory: getKnowledgeGapsByCategory(req.botId),
+    items: listKnowledgeGaps(req.botId),
+  });
+});
+
+// Marcar un vacío como resuelto (ya se subió el documento o se atendió).
+app.post("/api/knowledge-gaps/:id/resolve", async (req, res) => {
+  try {
+    const entry = await resolveKnowledgeGap(req.params.id, req.botId);
+    if (!entry) {
+      return res.status(404).json({ error: "Vacío no encontrado." });
+    }
+    res.json({ ok: true });
+  } catch (error) {
+    console.error("resolve gap error", error);
+    res.status(500).json({ error: error?.message || "Error." });
+  }
+});
+
 // Obtener estadísticas del índice de vectores
 app.get("/api/vector-index/stats", (req, res) => {
   try {
-    const stats = getIndexStats();
+    const stats = getIndexStats(req.botId);
     res.json(stats);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -1480,7 +2188,7 @@ app.post("/api/vector-index/rebuild", async (req, res) => {
 // ============================================================================
 
 app.get("/api/categories", (req, res) => {
-  const categories = getCategories();
+  const categories = getCategories(req.botId);
   res.json({
     categories,
     total: categories.length,
@@ -1488,7 +2196,7 @@ app.get("/api/categories", (req, res) => {
 });
 
 app.delete("/api/categories/:name", (req, res) => {
-  const deleted = deleteCategory(req.params.name);
+  const deleted = deleteCategory(req.params.name, req.botId);
   if (!deleted) {
     return res.status(404).json({ error: "Categoría no encontrada" });
   }
@@ -1497,7 +2205,7 @@ app.delete("/api/categories/:name", (req, res) => {
 
 // API: Suggested categories
 app.get("/api/suggested-categories", (req, res) => {
-  const suggested = getSuggestedCategories();
+  const suggested = getSuggestedCategories(req.botId);
   res.json({
     suggested,
     total: suggested.length,
@@ -1505,7 +2213,7 @@ app.get("/api/suggested-categories", (req, res) => {
 });
 
 app.get("/api/suggested-categories/pending", (req, res) => {
-  const pending = getSuggestedCategoriesPending();
+  const pending = getSuggestedCategoriesPending(req.botId);
   res.json({
     suggested: pending,
     total: pending.length,
@@ -1515,7 +2223,7 @@ app.get("/api/suggested-categories/pending", (req, res) => {
 app.post("/api/suggested-categories/:id/approve", (req, res) => {
   try {
     const { approverUserId } = req.body;
-    const approved = approveSuggestedCategory(req.params.id, approverUserId);
+    const approved = approveSuggestedCategory(req.params.id, approverUserId, req.botId);
     res.json({
       ok: true,
       category: approved.name,
@@ -1531,7 +2239,7 @@ app.post("/api/suggested-categories/:id/approve", (req, res) => {
 
 app.post("/api/suggested-categories/:id/reject", (req, res) => {
   try {
-    rejectSuggestedCategory(req.params.id);
+    rejectSuggestedCategory(req.params.id, req.botId);
     res.json({
       ok: true,
       message: "Sugerencia rechazada",
@@ -1546,7 +2254,7 @@ app.post("/api/suggested-categories/:id/reject", (req, res) => {
 
 app.put("/api/suggested-categories/:id", (req, res) => {
   try {
-    const updated = updateSuggestedCategory(req.params.id, req.body);
+    const updated = updateSuggestedCategory(req.params.id, req.body, req.botId);
     res.json({
       ok: true,
       category: updated,
@@ -1564,7 +2272,7 @@ app.put("/api/suggested-categories/:id", (req, res) => {
 // Crear nueva encuesta o quiz
 app.post("/api/surveys", (req, res) => {
   try {
-    const survey = createSurvey(req.body);
+    const survey = createSurvey(req.body, req.botId);
     res.json({
       ok: true,
       survey,
@@ -1583,6 +2291,7 @@ app.get("/api/surveys", (req, res) => {
     const filters = {};
     if (req.query.type) filters.type = req.query.type;
     if (req.query.status) filters.status = req.query.status;
+    filters.botId = req.botId;
     
     const surveys = getAllSurveys(filters);
     res.json({
@@ -1600,7 +2309,7 @@ app.get("/api/surveys", (req, res) => {
 // Obtener una encuesta específica
 app.get("/api/surveys/:id", (req, res) => {
   try {
-    const survey = getSurveyById(req.params.id);
+    const survey = getSurveyById(req.params.id, req.botId);
     if (!survey) {
       return res.status(404).json({
         ok: false,
@@ -1622,7 +2331,7 @@ app.get("/api/surveys/:id", (req, res) => {
 // Actualizar encuesta
 app.put("/api/surveys/:id", (req, res) => {
   try {
-    const survey = updateSurvey(req.params.id, req.body);
+    const survey = updateSurvey(req.params.id, req.body, req.botId);
     if (!survey) {
       return res.status(404).json({
         ok: false,
@@ -1644,7 +2353,7 @@ app.put("/api/surveys/:id", (req, res) => {
 // Eliminar encuesta
 app.delete("/api/surveys/:id", (req, res) => {
   try {
-    const deleted = deleteSurvey(req.params.id);
+    const deleted = deleteSurvey(req.params.id, req.botId);
     if (!deleted) {
       return res.status(404).json({
         ok: false,
@@ -1664,12 +2373,17 @@ app.delete("/api/surveys/:id", (req, res) => {
 
 // Enviar encuesta a usuarios
 app.post("/api/surveys/:id/send", async (req, res) => {
-  if (!process.env.TELEGRAM_BOT_TOKEN) {
-    return telegramNotConfigured(res);
+  const bot = getBotById(req.botId);
+  if (!bot) {
+    return res.status(404).json({ ok: false, error: "Bot no encontrado" });
+  }
+  const telegram = getTelegramForBot(bot);
+  if (!telegram.isConfigured) {
+    return telegramNotConfigured(res, bot.id);
   }
   
   try {
-    const survey = getSurveyById(req.params.id);
+    const survey = getSurveyById(req.params.id, req.botId);
     if (!survey) {
       return res.status(404).json({
         ok: false,
@@ -1677,14 +2391,13 @@ app.post("/api/surveys/:id/send", async (req, res) => {
       });
     }
     
-    const telegram = createTelegramService(process.env.TELEGRAM_BOT_TOKEN);
     const { userIds, sendToAll } = req.body;
     
     let targetUsers = [];
     
     if (sendToAll) {
       // Enviar a todos los usuarios
-      targetUsers = listTelegramUsers().map(u => u.chatId);
+      targetUsers = listTelegramUsers(req.botId).map(u => u.chatId);
     } else if (userIds && Array.isArray(userIds)) {
       targetUsers = userIds;
     } else {
@@ -1703,7 +2416,7 @@ app.post("/api/surveys/:id/send", async (req, res) => {
     
     for (const userId of targetUsers) {
       try {
-        await sendSurveyToUser(telegram, userId, survey.id);
+        await sendSurveyToUser(telegram, userId, survey.id, req.botId);
         results.sent++;
       } catch (error) {
         results.failed++;
@@ -1712,7 +2425,7 @@ app.post("/api/surveys/:id/send", async (req, res) => {
     }
     
     // Actualizar contador de envíos
-    markSurveyAsSent(survey.id, targetUsers);
+    markSurveyAsSent(survey.id, targetUsers, req.botId);
     
     res.json({
       ok: true,
@@ -1729,7 +2442,7 @@ app.post("/api/surveys/:id/send", async (req, res) => {
 // Cerrar encuesta
 app.post("/api/surveys/:id/close", (req, res) => {
   try {
-    const survey = closeSurvey(req.params.id);
+    const survey = closeSurvey(req.params.id, req.botId);
     if (!survey) {
       return res.status(404).json({
         ok: false,
@@ -1753,8 +2466,9 @@ app.get("/api/surveys/:id/responses", (req, res) => {
   try {
     const filters = {};
     if (req.query.userId) filters.userId = parseInt(req.query.userId);
+    filters.botId = req.botId;
     
-    const responses = getSurveyResponses(req.params.id, filters);
+    const responses = getSurveyResponses(req.params.id, filters, req.botId);
     res.json({
       ok: true,
       responses,
@@ -1770,7 +2484,7 @@ app.get("/api/surveys/:id/responses", (req, res) => {
 // Obtener estadísticas de una encuesta
 app.get("/api/surveys/:id/stats", (req, res) => {
   try {
-    const stats = getSurveyStats(req.params.id);
+    const stats = getSurveyStats(req.params.id, req.botId);
     if (!stats) {
       return res.status(404).json({
         ok: false,
@@ -1793,7 +2507,7 @@ app.get("/api/surveys/:id/stats", (req, res) => {
 app.get("/api/surveys/:id/leaderboard", (req, res) => {
   try {
     const limit = req.query.limit ? parseInt(req.query.limit) : 10;
-    const leaderboard = getQuizLeaderboard(req.params.id, limit);
+    const leaderboard = getQuizLeaderboard(req.params.id, limit, req.botId);
     res.json({
       ok: true,
       leaderboard,
@@ -1809,7 +2523,7 @@ app.get("/api/surveys/:id/leaderboard", (req, res) => {
 // Exportar respuestas a CSV
 app.get("/api/surveys/:id/export", (req, res) => {
   try {
-    const survey = getSurveyById(req.params.id);
+    const survey = getSurveyById(req.params.id, req.botId);
     if (!survey) {
       return res.status(404).json({
         ok: false,
@@ -1817,7 +2531,7 @@ app.get("/api/surveys/:id/export", (req, res) => {
       });
     }
     
-    const responses = getSurveyResponses(req.params.id);
+    const responses = getSurveyResponses(req.params.id, {}, req.botId);
     
     // Generar CSV
     let csv = "";
@@ -1932,7 +2646,24 @@ app.use((error, req, res, next) => {
 const port = process.env.PORT || 3000;
 
 async function startServer() {
-  await Promise.all([contextReady, documentsReady, memoryReady, usersReady, learningReady, categoriesReady, cacheReady]);
+  await Promise.all([
+    contextReady,
+    documentsReady,
+    memoryReady,
+    usersReady,
+    learningReady,
+    categoriesReady,
+    cacheReady,
+    botsReady,
+    authReady,
+    metricsReady,
+    errorsReady,
+    feedbackReady,
+    knowledgeGapsReady,
+  ]);
+  await ensureDefaultBot();
+  await ensureAdminFromEnv();
+  await ensureManagerFromEnv();
   app.listen(port, () => {
     console.log(`Server listening on port ${port}`);
   });

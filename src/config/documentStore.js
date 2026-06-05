@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import fs from "fs/promises";
 import path from "path";
+import { DEFAULT_BOT_ID, normalizeBotId } from "./botContext.js";
 
 const dataDir = path.resolve(process.cwd(), "data");
 const documentsPath = path.join(dataDir, "documents.json");
@@ -16,7 +17,11 @@ async function loadDocuments() {
     const raw = await fs.readFile(documentsPath, "utf8");
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed)) {
-      documentStore.splice(0, documentStore.length, ...parsed);
+      const normalized = parsed.map((doc) => ({
+        botId: normalizeBotId(doc?.botId || DEFAULT_BOT_ID),
+        ...doc,
+      }));
+      documentStore.splice(0, documentStore.length, ...normalized);
     }
   } catch (error) {
     if (error.code !== "ENOENT") {
@@ -36,18 +41,26 @@ async function persistDocuments() {
 
 export const documentsReady = loadDocuments();
 
-export function listDocuments() {
-  return documentStore.map((doc) => ({ ...doc }));
+export function listDocuments(botId) {
+  const resolved = normalizeBotId(botId);
+  return documentStore
+    .filter((doc) => normalizeBotId(doc?.botId) === resolved)
+    .map((doc) => ({ ...doc }));
 }
 
-export function getDocumentById(id) {
+export function getDocumentById(id, botId) {
+  if (botId) {
+    const resolved = normalizeBotId(botId);
+    return documentStore.find((doc) => doc.id === id && normalizeBotId(doc?.botId) === resolved) ?? null;
+  }
   return documentStore.find((doc) => doc.id === id) ?? null;
 }
 
-export function addDocument(metadata) {
+export function addDocument(metadata, botId) {
   const { summary, ...rest } = metadata;
   const document = {
     id: crypto.randomUUID(),
+    botId: normalizeBotId(botId || metadata?.botId || DEFAULT_BOT_ID),
     createdAt: new Date().toISOString(),
     status: "uploaded",
     progress: 0,
@@ -67,8 +80,13 @@ export function addDocument(metadata) {
   return document;
 }
 
-export function updateDocument(id, updates) {
-  const document = documentStore.find((doc) => doc.id === id);
+export function updateDocument(id, updates, botId) {
+  const resolved = botId ? normalizeBotId(botId) : null;
+  const document = documentStore.find((doc) => {
+    if (doc.id !== id) return false;
+    if (!resolved) return true;
+    return normalizeBotId(doc?.botId) === resolved;
+  });
   if (!document) {
     return null;
   }
@@ -82,8 +100,13 @@ export function updateDocument(id, updates) {
   return document;
 }
 
-export function removeDocument(id) {
-  const index = documentStore.findIndex((doc) => doc.id === id);
+export function removeDocument(id, botId) {
+  const resolved = botId ? normalizeBotId(botId) : null;
+  const index = documentStore.findIndex((doc) => {
+    if (doc.id !== id) return false;
+    if (!resolved) return true;
+    return normalizeBotId(doc?.botId) === resolved;
+  });
   if (index === -1) {
     return null;
   }

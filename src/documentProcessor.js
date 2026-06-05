@@ -11,6 +11,7 @@ import { load } from "cheerio";
 import { chunkText, embedChunks, embedChunkDescriptors } from "./embeddings.js";
 import { chunkByStructure, extractHtmlSectionsFromHtml } from "./structuredChunking.js";
 import { indexDocumentChunks } from "./config/documentVectorIndex.js";
+import { recordError } from "./config/errorStore.js";
 
 const PREVIEW_BYTES = 8192;
 const PDF_MIME_TYPES = new Set(["application/pdf"]);
@@ -291,31 +292,32 @@ async function runTesseract(pdfPath) {
   }
 }
 
-export async function processDocument(document) {
+export async function processDocument(document, { botId, openaiApiKey, claudeApiKey } = {}) {
+  const resolvedBotId = botId || document?.botId;
   updateDocument(document.id, {
     status: "processing",
     error: null,
-  });
+  }, resolvedBotId);
 
   try {
     let sourceText;
     if (isPdfDocument(document)) {
-      updateDocument(document.id, { status: "extracting" });
+      updateDocument(document.id, { status: "extracting" }, resolvedBotId);
       sourceText = await extractPdfText(document.path);
     } else if (isDocxDocument(document)) {
-      updateDocument(document.id, { status: "extracting" });
+      updateDocument(document.id, { status: "extracting" }, resolvedBotId);
       sourceText = await extractDocxText(document.path);
     } else if (isDocDocument(document)) {
-      updateDocument(document.id, { status: "extracting" });
+      updateDocument(document.id, { status: "extracting" }, resolvedBotId);
       sourceText = await extractDocText(document.path);
     } else if (isPlainTextDocument(document)) {
-      updateDocument(document.id, { status: "extracting" });
+      updateDocument(document.id, { status: "extracting" }, resolvedBotId);
       sourceText = await extractPlainText(document.path);
     } else if (isXlsxDocument(document) || isCsvDocument(document)) {
-      updateDocument(document.id, { status: "extracting" });
+      updateDocument(document.id, { status: "extracting" }, resolvedBotId);
       sourceText = await extractSpreadsheetText(document.path, document);
     } else if (isHtmlDocument(document)) {
-      updateDocument(document.id, { status: "extracting" });
+      updateDocument(document.id, { status: "extracting" }, resolvedBotId);
       sourceText = await extractHtmlText(document.path);
     } else {
       sourceText = await readPreview(document.path);
@@ -330,6 +332,10 @@ export async function processDocument(document) {
         }
       } catch (ocrError) {
         console.error(`OCR Tesseract fallido para ${document.id}:`, ocrError);
+        await recordError("ocr", ocrError?.message || "OCR fallido", {
+          botId: resolvedBotId,
+          context: { documentId: document.id },
+        });
       }
     }
     const limitedText = sourceText ? sourceText.slice(0, MAX_EXTRACTED_TEXT) : "";
@@ -364,12 +370,20 @@ export async function processDocument(document) {
         }
 
         if (Array.isArray(descriptors) && descriptors.length) {
-          chunks = await embedChunkDescriptors(descriptors);
+          chunks = await embedChunkDescriptors(descriptors, {
+            botId: resolvedBotId,
+          });
         } else {
-          chunks = await embedChunks(chunkText(limitedText));
+          chunks = await embedChunks(chunkText(limitedText), null, {
+            botId: resolvedBotId,
+          });
         }
       } catch (embedError) {
         console.error(`Embeddings fallidos para ${document.id}:`, embedError);
+        await recordError("document_embeddings", embedError?.message || "Embeddings fallidos", {
+          botId: resolvedBotId,
+          context: { documentId: document.id },
+        });
       }
     }
 
@@ -380,12 +394,12 @@ export async function processDocument(document) {
       usedOcr,
       status: "ready",
       processedAt: new Date().toISOString(),
-    });
+    }, resolvedBotId);
     
     // Indexar chunks en el índice de vectores si está habilitado
     if (process.env.USE_VECTOR_INDEX === 'true' && chunks && chunks.length > 0) {
       try {
-        const indexed = indexDocumentChunks(document.id, chunks);
+        const indexed = indexDocumentChunks(document.id, chunks, { botId: resolvedBotId });
         console.log(`✓ Documento ${document.id}: ${indexed} chunks indexados`);
       } catch (indexError) {
         console.error(`Error indexando documento ${document.id}:`, indexError);
@@ -395,7 +409,11 @@ export async function processDocument(document) {
     updateDocument(document.id, {
       status: "error",
       error: error?.message || "Error desconocido",
-    });
+    }, resolvedBotId);
     console.error(`Procesamiento de documento ${document.id} fallido:`, error);
+    await recordError("document_processing", error?.message || "Error documento", {
+      botId: resolvedBotId,
+      context: { documentId: document.id },
+    });
   }
 }

@@ -1,6 +1,7 @@
 // Categories store for AI response categories
 import fs from "fs";
 import path from "path";
+import { DEFAULT_BOT_ID, normalizeBotId } from "./botContext.js";
 
 const DATA_PATH = path.resolve("data/categories.json");
 const DATA_DIR = path.dirname(DATA_PATH);
@@ -14,8 +15,14 @@ function loadData() {
     if (fs.existsSync(DATA_PATH)) {
       const raw = fs.readFileSync(DATA_PATH, "utf8");
       const data = JSON.parse(raw);
-      categories = data.categories || [];
-      suggestedCategories = data.suggested || [];
+      categories = (data.categories || []).map((cat) => ({
+        botId: normalizeBotId(cat?.botId || DEFAULT_BOT_ID),
+        ...cat,
+      }));
+      suggestedCategories = (data.suggested || []).map((suggestion) => ({
+        botId: normalizeBotId(suggestion?.botId || DEFAULT_BOT_ID),
+        ...suggestion,
+      }));
     }
   } catch (e) {
     console.error("No se pudo cargar categorías", e);
@@ -46,22 +53,26 @@ function persistData() {
   }
 }
 
-export function getCategories() {
+export function getCategories(botId) {
   loadData();
-  return categories.map(c => ({
-    name: c.name,
-    displayName: c.displayName,
-    enabled: c.enabled !== undefined ? c.enabled : true,
-    keywords: c.keywords || [],
-    keywordsCount: (c.keywords || []).length,
-    patternsCount: c.patternsCount || 0,
-  }));
+  const resolved = normalizeBotId(botId);
+  return categories
+    .filter((c) => normalizeBotId(c?.botId) === resolved)
+    .map(c => ({
+      name: c.name,
+      displayName: c.displayName,
+      enabled: c.enabled !== undefined ? c.enabled : true,
+      keywords: c.keywords || [],
+      keywordsCount: (c.keywords || []).length,
+      patternsCount: c.patternsCount || 0,
+    }));
 }
 
-export function addCategory(name, displayName, keywords = []) {
+export function addCategory(name, displayName, keywords = [], botId) {
   loadData();
+  const resolved = normalizeBotId(botId);
   
-  const existing = categories.find(c => c.name === name);
+  const existing = categories.find(c => c.name === name && normalizeBotId(c?.botId) === resolved);
   if (existing) {
     return existing;
   }
@@ -72,6 +83,7 @@ export function addCategory(name, displayName, keywords = []) {
     enabled: true,
     keywords,
     patternsCount: 0,
+    botId: resolved,
   };
   
   categories.push(newCategory);
@@ -80,10 +92,11 @@ export function addCategory(name, displayName, keywords = []) {
   return newCategory;
 }
 
-export function deleteCategory(name) {
+export function deleteCategory(name, botId) {
   loadData();
+  const resolved = normalizeBotId(botId);
   const initialLength = categories.length;
-  categories = categories.filter(c => c.name !== name);
+  categories = categories.filter(c => !(c.name === name && normalizeBotId(c?.botId) === resolved));
   
   if (categories.length < initialLength) {
     persistData();
@@ -92,9 +105,10 @@ export function deleteCategory(name) {
   return false;
 }
 
-export function updateCategory(name, updates) {
+export function updateCategory(name, updates, botId) {
   loadData();
-  const categoryIndex = categories.findIndex(c => c.name === name);
+  const resolved = normalizeBotId(botId);
+  const categoryIndex = categories.findIndex(c => c.name === name && normalizeBotId(c?.botId) === resolved);
   if (categoryIndex === -1) {
     throw new Error(`Categoría ${name} no encontrada`);
   }
@@ -103,6 +117,7 @@ export function updateCategory(name, updates) {
     ...categories[categoryIndex],
     ...updates,
     name: categories[categoryIndex].name, // Preserve name
+    botId: resolved,
   };
   
   persistData();
@@ -110,24 +125,29 @@ export function updateCategory(name, updates) {
 }
 
 // Suggested categories
-export function getSuggestedCategories() {
+export function getSuggestedCategories(botId) {
   loadData();
-  return suggestedCategories.map(s => ({
-    ...s,
-  }));
-}
-
-export function getSuggestedCategoriesPending() {
-  loadData();
+  const resolved = normalizeBotId(botId);
   return suggestedCategories
-    .filter(s => s.status !== "approved" && s.status !== "rejected")
+    .filter((s) => normalizeBotId(s?.botId) === resolved)
     .map(s => ({
       ...s,
     }));
 }
 
-export function addSuggestedCategory(category) {
+export function getSuggestedCategoriesPending(botId) {
   loadData();
+  const resolved = normalizeBotId(botId);
+  return suggestedCategories
+    .filter(s => normalizeBotId(s?.botId) === resolved && s.status !== "approved" && s.status !== "rejected")
+    .map(s => ({
+      ...s,
+    }));
+}
+
+export function addSuggestedCategory(category, botId) {
+  loadData();
+  const resolved = normalizeBotId(botId);
   
   const newSuggestion = {
     id: `suggested_${Date.now()}_${Math.random().toString(36).slice(2)}`,
@@ -139,6 +159,7 @@ export function addSuggestedCategory(category) {
     suggestedAt: new Date().toISOString(),
     approvedAt: null,
     approverUserId: null,
+    botId: resolved,
   };
   
   suggestedCategories.push(newSuggestion);
@@ -147,9 +168,10 @@ export function addSuggestedCategory(category) {
   return newSuggestion;
 }
 
-export function approveSuggestedCategory(id, approverUserId) {
+export function approveSuggestedCategory(id, approverUserId, botId) {
   loadData();
-  const suggestIndex = suggestedCategories.findIndex(s => s.id === id);
+  const resolved = normalizeBotId(botId);
+  const suggestIndex = suggestedCategories.findIndex(s => s.id === id && normalizeBotId(s?.botId) === resolved);
   if (suggestIndex === -1) {
     throw new Error(`Sugerencia ${id} no encontrada`);
   }
@@ -157,7 +179,7 @@ export function approveSuggestedCategory(id, approverUserId) {
   const suggestion = suggestedCategories[suggestIndex];
   
   // Add as regular category
-  addCategory(suggestion.name, suggestion.displayName, suggestion.keywords);
+  addCategory(suggestion.name, suggestion.displayName, suggestion.keywords, resolved);
   
   // Update suggestion status
   suggestedCategories[suggestIndex] = {
@@ -165,6 +187,7 @@ export function approveSuggestedCategory(id, approverUserId) {
     status: "approved",
     approvedAt: new Date().toISOString(),
     approverUserId: approverUserId || null,
+    botId: resolved,
   };
   
   persistData();
@@ -172,9 +195,10 @@ export function approveSuggestedCategory(id, approverUserId) {
   return suggestedCategories[suggestIndex];
 }
 
-export function rejectSuggestedCategory(id) {
+export function rejectSuggestedCategory(id, botId) {
   loadData();
-  const suggestIndex = suggestedCategories.findIndex(s => s.id === id);
+  const resolved = normalizeBotId(botId);
+  const suggestIndex = suggestedCategories.findIndex(s => s.id === id && normalizeBotId(s?.botId) === resolved);
   if (suggestIndex === -1) {
     throw new Error(`Sugerencia ${id} no encontrada`);
   }
@@ -182,6 +206,7 @@ export function rejectSuggestedCategory(id) {
   suggestedCategories[suggestIndex] = {
     ...suggestedCategories[suggestIndex],
     status: "rejected",
+    botId: resolved,
   };
   
   persistData();
@@ -189,9 +214,10 @@ export function rejectSuggestedCategory(id) {
   return suggestedCategories[suggestIndex];
 }
 
-export function updateSuggestedCategory(id, updates) {
+export function updateSuggestedCategory(id, updates, botId) {
   loadData();
-  const suggestIndex = suggestedCategories.findIndex(s => s.id === id);
+  const resolved = normalizeBotId(botId);
+  const suggestIndex = suggestedCategories.findIndex(s => s.id === id && normalizeBotId(s?.botId) === resolved);
   if (suggestIndex === -1) {
     throw new Error(`Sugerencia ${id} no encontrada`);
   }
@@ -200,6 +226,7 @@ export function updateSuggestedCategory(id, updates) {
     ...suggestedCategories[suggestIndex],
     ...updates,
     id: suggestedCategories[suggestIndex].id, // Preserve ID
+    botId: resolved,
   };
   
   persistData();

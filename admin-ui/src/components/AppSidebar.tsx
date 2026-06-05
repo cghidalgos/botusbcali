@@ -1,6 +1,7 @@
-import { MessageSquare, FileText, Clock, Activity, Home, Brain, Users, Tags, ClipboardList } from "lucide-react";
+import { MessageSquare, FileText, Clock, Activity, Home, Brain, Users, Tags, ClipboardList, Layers, Shield, ThumbsUp, AlertCircle } from "lucide-react";
 import { NavLink } from "@/components/NavLink";
 import logoBot from "@/assets/logoBot.png";
+import { useAuth } from "@/lib/authContext";
 
 import {
   Sidebar,
@@ -21,14 +22,29 @@ const items = [
   { title: "Encuestas", url: "/surveys", icon: ClipboardList },
   { title: "Historial", url: "/historial", icon: Clock },
   { title: "Usuarios", url: "/usuarios", icon: Users },
+  { title: "Bots", url: "/bots", icon: Layers },
+  { title: "Accesos", url: "/accesos", icon: Shield },
   { title: "Categorías", url: "/categorias", icon: Tags },
   { title: "Actividad", url: "/actividad", icon: Activity },
   { title: "Aprendizaje", url: "/aprendizaje", icon: Brain },
+  { title: "Feedback", url: "/feedback", icon: ThumbsUp },
+  { title: "Vacíos", url: "/vacios", icon: AlertCircle },
 ];
 
 export function AppSidebar() {
   const { state } = useSidebar();
   const collapsed = state === "collapsed";
+  const { user } = useAuth();
+
+  const visibleItems = items.filter((item) => {
+    if (user?.role === "admin") {
+      return item.url === "/bots" || item.url === "/accesos";
+    }
+    if (item.url === "/bots" || item.url === "/accesos") {
+      return false;
+    }
+    return true;
+  });
 
   return (
     <Sidebar collapsible="icon" className="border-r border-sidebar-border">
@@ -47,7 +63,7 @@ export function AppSidebar() {
           <SidebarGroupLabel>Navegación</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
-              {items.map((item) => (
+              {visibleItems.map((item) => (
                 <SidebarMenuItem key={item.title}>
                   <SidebarMenuButton asChild>
                     <NavLink

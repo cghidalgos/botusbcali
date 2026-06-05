@@ -1,6 +1,7 @@
 // Embedding Cache - Evita recalcular embeddings para preguntas similares
 import fs from "fs";
 import path from "path";
+import { DEFAULT_BOT_ID, normalizeBotId } from "./botContext.js";
 
 const CACHE_PATH = path.resolve("data/embedding-cache.json");
 const DATA_DIR = path.dirname(CACHE_PATH);
@@ -20,7 +21,13 @@ function loadCache() {
   try {
     if (fs.existsSync(CACHE_PATH)) {
       const raw = fs.readFileSync(CACHE_PATH, "utf8");
-      embeddingCache = JSON.parse(raw);
+      const parsed = JSON.parse(raw);
+      embeddingCache = Array.isArray(parsed)
+        ? parsed.map((entry) => ({
+            botId: normalizeBotId(entry?.botId || DEFAULT_BOT_ID),
+            ...entry,
+          }))
+        : [];
       console.log(`✓ Embedding cache cargado: ${embeddingCache.length} entradas`);
     }
   } catch (e) {
@@ -96,15 +103,17 @@ function textSimilarity(str1, str2) {
  * @param {number} threshold - Umbral de similitud (default 0.95)
  * @returns {Array|null} - Embedding cacheado o null
  */
-export function getCachedEmbedding(text, threshold = 0.95) {
+export function getCachedEmbedding(text, { threshold = 0.95, botId } = {}) {
   if (!text || typeof text !== "string") return null;
   
   loadCache();
+  const resolved = normalizeBotId(botId);
   
   const normalized = normalizeText(text);
   
   // Búsqueda exacta primero (O(n) pero muy rápido para matches exactos)
   for (const entry of embeddingCache) {
+    if (normalizeBotId(entry?.botId) !== resolved) continue;
     if (normalizeText(entry.text) === normalized) {
       stats.hits++;
       stats.savings += 0.00002; // ~$0.00002 por 1K tokens
@@ -121,6 +130,7 @@ export function getCachedEmbedding(text, threshold = 0.95) {
   let bestSimilarity = 0;
   
   for (const entry of embeddingCache) {
+    if (normalizeBotId(entry?.botId) !== resolved) continue;
     const similarity = textSimilarity(text, entry.text);
     if (similarity > bestSimilarity && similarity >= threshold) {
       bestSimilarity = similarity;
@@ -146,16 +156,17 @@ export function getCachedEmbedding(text, threshold = 0.95) {
  * @param {string} text - Texto original
  * @param {Array} embedding - Vector de embedding
  */
-export function cacheEmbedding(text, embedding) {
+export function cacheEmbedding(text, embedding, { botId } = {}) {
   if (!text || !embedding || !Array.isArray(embedding)) return;
   
   loadCache();
+  const resolved = normalizeBotId(botId);
   
   const normalized = normalizeText(text);
   
   // Evitar duplicados exactos
   const existsIndex = embeddingCache.findIndex(
-    entry => normalizeText(entry.text) === normalized
+    entry => normalizeBotId(entry?.botId) === resolved && normalizeText(entry.text) === normalized
   );
   
   const now = Date.now();
@@ -164,12 +175,14 @@ export function cacheEmbedding(text, embedding) {
     // Actualizar existente
     embeddingCache[existsIndex] = {
       ...embeddingCache[existsIndex],
+      botId: resolved,
       embedding,
       updatedAt: now,
     };
   } else {
     // Agregar nuevo
     embeddingCache.push({
+      botId: resolved,
       text,
       embedding,
       hitCount: 0,
@@ -193,10 +206,18 @@ export function cacheEmbedding(text, embedding) {
 /**
  * Obtiene estadísticas del cache
  */
-export function getEmbeddingCacheStats() {
+export function getEmbeddingCacheStats(botId) {
   loadCache();
+
+  return getEmbeddingCacheStatsByBot(botId || DEFAULT_BOT_ID);
+}
+
+export function getEmbeddingCacheStatsByBot(botId) {
+  loadCache();
+  const resolved = normalizeBotId(botId);
+  const scoped = embeddingCache.filter((entry) => normalizeBotId(entry?.botId) === resolved);
   
-  const totalEntries = embeddingCache.length;
+  const totalEntries = scoped.length;
   const totalHits = stats.hits;
   const totalMisses = stats.misses;
   const hitRate = totalHits + totalMisses > 0 
@@ -205,7 +226,7 @@ export function getEmbeddingCacheStats() {
   const estimatedSavings = stats.savings.toFixed(4);
   
   // Top queries
-  const topQueries = [...embeddingCache]
+  const topQueries = [...scoped]
     .filter(e => (e.hitCount || 0) > 0)
     .sort((a, b) => (b.hitCount || 0) - (a.hitCount || 0))
     .slice(0, 10)
@@ -228,13 +249,15 @@ export function getEmbeddingCacheStats() {
  * Limpia entradas antiguas no usadas
  * @param {number} maxAgeMs - Edad máxima en milisegundos (default 90 días)
  */
-export function cleanOldEmbeddings(maxAgeMs = 90 * 24 * 60 * 60 * 1000) {
+export function cleanOldEmbeddings(maxAgeMs = 90 * 24 * 60 * 60 * 1000, botId) {
   loadCache();
   
+  const resolved = botId ? normalizeBotId(botId) : null;
   const now = Date.now();
   const initialCount = embeddingCache.length;
   
   embeddingCache = embeddingCache.filter(entry => {
+    if (resolved && normalizeBotId(entry?.botId) !== resolved) return true;
     const age = now - (entry.lastUsedAt || entry.createdAt || 0);
     return age < maxAgeMs;
   });
@@ -246,7 +269,7 @@ export function cleanOldEmbeddings(maxAgeMs = 90 * 24 * 60 * 60 * 1000) {
     console.log(`✓ Limpieza de embedding cache: ${removed} entradas antiguas eliminadas`);
   }
   
-  return { removed, remaining: embeddingCache.length };
+  return { removed, remaining: resolved ? embeddingCache.filter(entry => normalizeBotId(entry?.botId) === resolved).length : embeddingCache.length };
 }
 
 /**

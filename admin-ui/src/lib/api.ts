@@ -15,14 +15,50 @@ const getApiBase = () => {
 
 const API_BASE = getApiBase();
 
+function getAuthToken() {
+  if (typeof window === "undefined") return "";
+  return window.localStorage.getItem("auth_token") || "";
+}
+
+function getActiveBotId() {
+  if (typeof window === "undefined") return "";
+  const manageMode = window.sessionStorage.getItem("bot_manage_mode") === "true";
+  if (!manageMode) return "";
+  return window.sessionStorage.getItem("active_bot_id") || "";
+}
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const headers = new Headers(options.headers || {});
+  const token = getAuthToken();
+  const botId = getActiveBotId();
+  if (token && !headers.has("Authorization")) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+  if (botId && !headers.has("x-bot-id")) {
+    headers.set("x-bot-id", botId);
+  }
+
   const response = await fetch(`${API_BASE}${path}`, {
     credentials: "same-origin",
     ...options,
+    headers,
   });
 
   if (!response.ok) {
     const errorText = await response.text();
+    // Token vencido o inválido: limpiar sesión y mandar al login.
+    if (response.status === 401 && typeof window !== "undefined") {
+      const isAuthCall = path.includes("/api/auth/");
+      if (!isAuthCall) {
+        window.localStorage.removeItem("auth_token");
+        const prefix =
+          window.location.pathname.startsWith("/botusbcali") ? "/botusbcali" : "";
+        const loginPath = `${prefix}/login`;
+        if (!window.location.pathname.endsWith("/login")) {
+          window.location.assign(loginPath);
+        }
+      }
+    }
     throw new Error(errorText || `Request failed: ${response.status}`);
   }
 
@@ -104,6 +140,74 @@ export interface UserProfile {
   messageCount?: number;
   updatedAt?: string;
   createdAt?: string;
+}
+
+export interface BotRecord {
+  id: string;
+  name: string;
+  imageUrl?: string;
+  telegramToken?: string;
+  claudeApiKey?: string;
+  status: "active" | "inactive";
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BotListResponse {
+  bots: BotRecord[];
+}
+
+export interface AuthUserRecord {
+  id: string;
+  email: string;
+  role: "admin" | "manager";
+  botIds: string[];
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface AuthUserListResponse {
+  users: AuthUserRecord[];
+}
+
+export interface MetricsDailyEntry {
+  date: string;
+  openai: {
+    requests: number;
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+    estimatedCost: number;
+  };
+  embeddings: {
+    requests: number;
+    totalTokens: number;
+  };
+  questions: number;
+  answers: number;
+}
+
+export interface MetricsOverviewResponse {
+  botId: string;
+  days: number;
+  data: MetricsDailyEntry[];
+}
+
+export interface TopQuestionsResponse {
+  botId: string;
+  items: Array<{ text: string; count: number; lastAskedAt: string }>;
+}
+
+export interface ErrorLogResponse {
+  botId: string;
+  items: Array<{
+    id: string;
+    botId: string;
+    type: string;
+    message: string;
+    context?: Record<string, unknown> | null;
+    createdAt: string;
+  }>;
 }
 
 export interface FAQ {
@@ -282,6 +386,177 @@ export async function getProfileStats(): Promise<ProfileStats> {
   return request("/api/profiles/stats");
 }
 
+// BOTS (admin)
+export async function listBots(): Promise<BotListResponse> {
+  return request("/api/bots");
+}
+
+export async function createBot(payload: Partial<BotRecord>): Promise<{ ok: true; bot: BotRecord }> {
+  return request("/api/bots", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateBot(botId: string, payload: Partial<BotRecord>): Promise<{ ok: true; bot: BotRecord }> {
+  return request(`/api/bots/${botId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteBot(botId: string): Promise<{ ok: true }> {
+  return request(`/api/bots/${botId}`, {
+    method: "DELETE",
+  });
+}
+
+// USUARIOS ADMIN/MANAGER
+export async function listAuthUsers(): Promise<AuthUserListResponse> {
+  const response = await request<AuthUserListResponse | AuthUserRecord[]>("/api/auth/users");
+  if (Array.isArray(response)) {
+    return { users: response };
+  }
+  return response;
+}
+
+export async function createAuthUser(payload: {
+  email: string;
+  password: string;
+  role?: "admin" | "manager";
+  botIds?: string[];
+}): Promise<{ ok: true; user: AuthUserRecord }> {
+  return request("/api/auth/users", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateAuthUser(
+  userId: string,
+  payload: Partial<Omit<AuthUserRecord, "id">> & { password?: string }
+): Promise<{ ok: true; user: AuthUserRecord }> {
+  return request(`/api/auth/users/${userId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteAuthUser(userId: string): Promise<{ ok: true }> {
+  return request(`/api/auth/users/${userId}`, {
+    method: "DELETE",
+  });
+}
+
+// METRICS & ERRORS
+export async function getMetricsOverview(days = 7): Promise<MetricsOverviewResponse> {
+  return request(`/api/metrics/overview?days=${days}`);
+}
+
+export async function getTopQuestions(limit = 10): Promise<TopQuestionsResponse> {
+  return request(`/api/metrics/questions/top?limit=${limit}`);
+}
+
+export async function getRecentErrors(limit = 100): Promise<ErrorLogResponse> {
+  return request(`/api/errors/recent?limit=${limit}`);
+}
+
+// FEEDBACK 👍/👎
+export interface FeedbackEntry {
+  id: string;
+  botId: string;
+  chatId: string | null;
+  question: string;
+  answer: string;
+  rating: "up" | "down";
+  createdAt: string;
+  resolved?: boolean;
+  resolvedAnswer?: string;
+  resolvedAt?: string;
+}
+
+export interface FeedbackStats {
+  up: number;
+  down: number;
+  total: number;
+  pendingDown: number;
+  resolvedDown: number;
+}
+
+export interface FeedbackResponse {
+  botId: string;
+  stats: FeedbackStats;
+  items: FeedbackEntry[];
+}
+
+export async function getFeedback(params: {
+  rating?: "up" | "down";
+  resolved?: boolean;
+  limit?: number;
+} = {}): Promise<FeedbackResponse> {
+  const q = new URLSearchParams();
+  if (params.rating) q.set("rating", params.rating);
+  if (params.resolved !== undefined) q.set("resolved", String(params.resolved));
+  if (params.limit) q.set("limit", String(params.limit));
+  const qs = q.toString();
+  return request(`/api/feedback${qs ? `?${qs}` : ""}`);
+}
+
+export async function regenerateFeedbackAnswer(
+  id: string
+): Promise<{ ok: boolean; question: string; answer: string; source: string; error?: string }> {
+  return request(`/api/feedback/${id}/regenerate`, { method: "POST" });
+}
+
+export async function resolveFeedback(
+  id: string,
+  answer: string
+): Promise<{ ok: boolean; savedToFaq: boolean }> {
+  return request(`/api/feedback/${id}/resolve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ answer }),
+  });
+}
+
+// VACÍOS DE CONOCIMIENTO
+export interface KnowledgeGap {
+  id: string;
+  botId: string;
+  question: string;
+  lastAnswer: string;
+  category: string;
+  count: number;
+  resolved: boolean;
+  createdAt: string;
+  lastSeenAt: string;
+}
+
+export interface KnowledgeGapCategory {
+  category: string;
+  total: number;
+  items: KnowledgeGap[];
+}
+
+export interface KnowledgeGapsResponse {
+  botId: string;
+  stats: { pending: number; resolved: number; totalOccurrences: number };
+  byCategory: KnowledgeGapCategory[];
+  items: KnowledgeGap[];
+}
+
+export async function getKnowledgeGaps(): Promise<KnowledgeGapsResponse> {
+  return request("/api/knowledge-gaps");
+}
+
+export async function resolveKnowledgeGap(id: string): Promise<{ ok: boolean }> {
+  return request(`/api/knowledge-gaps/${id}/resolve`, { method: "POST" });
+}
+
 // USUARIOS
 export async function listUsers(): Promise<UserProfile[]> {
   return request("/api/users");
@@ -366,6 +641,16 @@ export async function sendBroadcast(options: BroadcastOptions): Promise<Broadcas
   if (options.broadcastSecret) {
     headers["x-broadcast-secret"] = options.broadcastSecret;
   }
+
+  const token = getAuthToken();
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+
+  const botId = getActiveBotId();
+  if (botId) {
+    headers["x-bot-id"] = botId;
+  }
   
   const response = await fetch(`${API_BASE}/send-broadcast`, {
     method: "POST",
@@ -399,25 +684,15 @@ export interface EmbeddingCacheStats {
 }
 
 export async function getEmbeddingCacheStats(): Promise<EmbeddingCacheStats> {
-  const response = await fetch(`${API_BASE}/api/embedding-cache/stats`);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch embedding cache stats: ${response.status}`);
-  }
-  return response.json();
+  return request<EmbeddingCacheStats>("/api/embedding-cache/stats");
 }
 
 export async function cleanOldEmbeddingCache(maxAgeDays: number): Promise<{ removed: number; remaining: number }> {
-  const response = await fetch(`${API_BASE}/api/embedding-cache/clean`, {
+  return request("/api/embedding-cache/clean", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ maxAgeDays }),
   });
-  if (!response.ok) {
-    throw new Error(`Failed to clean embedding cache: ${response.status}`);
-  }
-  return response.json();
 }
 
 // ============================================================================
@@ -439,21 +714,13 @@ export interface VectorIndexStats {
 }
 
 export async function getVectorIndexStats(): Promise<VectorIndexStats> {
-  const response = await fetch(`${API_BASE}/api/vector-index/stats`);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch vector index stats: ${response.status}`);
-  }
-  return response.json();
+  return request<VectorIndexStats>("/api/vector-index/stats");
 }
 
 export async function rebuildVectorIndex(): Promise<{ success: boolean; message: string }> {
-  const response = await fetch(`${API_BASE}/api/vector-index/rebuild`, {
+  return request("/api/vector-index/rebuild", {
     method: "POST",
   });
-  if (!response.ok) {
-    throw new Error(`Failed to rebuild vector index: ${response.status}`);
-  }
-  return response.json();
 }
 
 // ============================================================================
@@ -768,9 +1035,10 @@ export function formatBytes(bytes: number): string {
   return `${value.toFixed(1)} ${units[index]}`;
 }
 
-export function formatDate(value?: string | null): string {
-  if (!value) return "Sin fecha";
-  const date = new Date(value);
+export function formatDate(value?: string | number | null): string {
+  if (value === null || value === undefined || value === "") return "Sin fecha";
+  const normalized = typeof value === "number" ? value : Number(value);
+  const date = Number.isFinite(normalized) ? new Date(normalized) : new Date(String(value));
   if (Number.isNaN(date.getTime())) return "Sin fecha";
   return date.toLocaleString();
 }

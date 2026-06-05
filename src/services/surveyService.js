@@ -13,8 +13,8 @@ import {
 /**
  * Envía una encuesta o quiz a un usuario de Telegram
  */
-export async function sendSurveyToUser(telegram, userId, surveyId) {
-  const survey = getSurveyById(surveyId);
+export async function sendSurveyToUser(telegram, userId, surveyId, botId) {
+  const survey = getSurveyById(surveyId, botId);
   if (!survey) {
     throw new Error("Encuesta no encontrada");
   }
@@ -38,11 +38,11 @@ export async function sendSurveyToUser(telegram, userId, surveyId) {
     message += `✅ Aprobación: ${settings.passingScore}%\n`;
     
     if (settings.maxAttempts > 1) {
-      const attempts = getUserAttemptCount(surveyId, userId);
+      const attempts = getUserAttemptCount(surveyId, userId, botId);
       message += `🔄 Intentos: ${attempts}/${settings.maxAttempts}\n`;
     }
     
-    const leaderboard = getQuizLeaderboard(surveyId, 1);
+    const leaderboard = getQuizLeaderboard(surveyId, 1, botId);
     if (leaderboard.length > 0 && settings.showLeaderboard) {
       message += `\n🏆 Mejor puntaje actual: ${leaderboard[0].percentage.toFixed(1)}%`;
     }
@@ -88,8 +88,8 @@ export async function sendSurveyToUser(telegram, userId, surveyId) {
 /**
  * Inicia una encuesta/quiz para un usuario
  */
-export async function startSurvey(telegram, userId, chatId, surveyId, messageId) {
-  const survey = getSurveyById(surveyId);
+export async function startSurvey(telegram, userId, chatId, surveyId, messageId, botId) {
+  const survey = getSurveyById(surveyId, botId);
   if (!survey) {
     await telegram.sendMessage(chatId, "❌ Encuesta no encontrada");
     return;
@@ -97,7 +97,7 @@ export async function startSurvey(telegram, userId, chatId, surveyId, messageId)
   
   // Verificar si es quiz y tiene límite de intentos
   if (survey.type === "quiz") {
-    const attempts = getUserAttemptCount(surveyId, userId);
+    const attempts = getUserAttemptCount(surveyId, userId, botId);
     const maxAttempts = survey.quizSettings.maxAttempts;
     
     if (attempts >= maxAttempts) {
@@ -107,23 +107,23 @@ export async function startSurvey(telegram, userId, chatId, surveyId, messageId)
   }
   
   // Crear nueva sesión
-  const sessionId = createSession(userId, surveyId);
+  const sessionId = createSession(userId, surveyId, botId);
   
   // Mostrar primera pregunta
-  await showQuestion(telegram, chatId, sessionId, 0);
+  await showQuestion(telegram, chatId, sessionId, 0, botId);
 }
 
 /**
  * Muestra una pregunta al usuario
  */
-async function showQuestion(telegram, chatId, sessionId, questionIndex) {
-  const session = getSession(sessionId);
+async function showQuestion(telegram, chatId, sessionId, questionIndex, botId) {
+  const session = getSession(sessionId, botId);
   if (!session) {
     await telegram.sendMessage(chatId, "❌ Sesión expirada. Por favor inicia nuevamente.");
     return;
   }
   
-  const survey = getSurveyById(session.surveyId);
+  const survey = getSurveyById(session.surveyId, botId);
   if (!survey || questionIndex >= survey.questions.length) {
     await telegram.sendMessage(chatId, "❌ Error al cargar la pregunta.");
     return;
@@ -193,7 +193,7 @@ async function showQuestion(telegram, chatId, sessionId, questionIndex) {
     updateSession(sessionId, {
       waitingForText: true,
       currentQuestionIndex: questionIndex,
-    });
+    }, botId);
   } else if (question.type === "yes_no") {
     keyboard.inline_keyboard.push([
       {
@@ -226,14 +226,14 @@ async function showQuestion(telegram, chatId, sessionId, questionIndex) {
 /**
  * Procesa una respuesta del usuario
  */
-export async function handleSurveyAnswer(telegram, userId, chatId, sessionId, questionIndex, answer) {
-  const session = getSession(sessionId);
+export async function handleSurveyAnswer(telegram, userId, chatId, sessionId, questionIndex, answer, botId) {
+  const session = getSession(sessionId, botId);
   if (!session) {
     await telegram.sendMessage(chatId, "❌ Sesión expirada. Por favor inicia nuevamente.");
     return;
   }
   
-  const survey = getSurveyById(session.surveyId);
+  const survey = getSurveyById(session.surveyId, botId);
   if (!survey) return;
   
   const question = survey.questions[questionIndex];
@@ -282,7 +282,7 @@ export async function handleSurveyAnswer(telegram, userId, chatId, sessionId, qu
   }
   
   answers[questionIndex] = answerData;
-  updateSession(sessionId, { answers });
+  updateSession(sessionId, { answers }, botId);
   
   // Mostrar feedback si es quiz y está configurado
   if (isQuiz && survey.quizSettings.showResults === "immediate") {
@@ -292,11 +292,11 @@ export async function handleSurveyAnswer(telegram, userId, chatId, sessionId, qu
   // Continuar a la siguiente pregunta o finalizar
   const nextIndex = questionIndex + 1;
   if (nextIndex < survey.questions.length) {
-    updateSession(sessionId, { currentQuestionIndex: nextIndex });
-    setTimeout(() => showQuestion(telegram, chatId, sessionId, nextIndex), isQuiz ? 2000 : 500);
+    updateSession(sessionId, { currentQuestionIndex: nextIndex }, botId);
+    setTimeout(() => showQuestion(telegram, chatId, sessionId, nextIndex, botId), isQuiz ? 2000 : 500);
   } else {
     // Completar encuesta/quiz
-    await completeSurvey(telegram, chatId, sessionId);
+    await completeSurvey(telegram, chatId, sessionId, botId);
   }
 }
 
@@ -327,11 +327,11 @@ async function showImmediateFeedback(telegram, chatId, question, answerData, set
 /**
  * Completa la encuesta/quiz
  */
-async function completeSurvey(telegram, chatId, sessionId) {
-  const session = getSession(sessionId);
+async function completeSurvey(telegram, chatId, sessionId, botId) {
+  const session = getSession(sessionId, botId);
   if (!session) return;
   
-  const survey = getSurveyById(session.surveyId);
+  const survey = getSurveyById(session.surveyId, botId);
   if (!survey) return;
   
   const isQuiz = survey.type === "quiz";
@@ -357,14 +357,14 @@ async function completeSurvey(telegram, chatId, sessionId) {
     responseData.totalPoints = totalPoints;
     responseData.percentage = percentage;
     responseData.passed = passed;
-    responseData.attemptNumber = getUserAttemptCount(survey.id, session.userId) + 1;
+    responseData.attemptNumber = getUserAttemptCount(survey.id, session.userId, botId) + 1;
   }
   
   // Guardar respuesta
-  saveResponse(responseData);
+  saveResponse(responseData, botId);
   
   // Eliminar sesión
-  deleteSession(sessionId);
+  deleteSession(sessionId, botId);
   
   // Mostrar resultados finales
   await showFinalResults(telegram, chatId, survey, responseData);
@@ -392,7 +392,7 @@ async function showFinalResults(telegram, chatId, survey, responseData) {
     });
     
     if (survey.quizSettings.showLeaderboard) {
-      const leaderboard = getQuizLeaderboard(survey.id, 10);
+      const leaderboard = getQuizLeaderboard(survey.id, 10, survey.botId);
       const userRank = leaderboard.findIndex((entry) => entry.userId === responseData.userId) + 1;
       if (userRank > 0) {
         message += `\nTu posición: <b>#${userRank}</b> de ${leaderboard.length}`;
@@ -442,14 +442,14 @@ async function showFinalResults(telegram, chatId, survey, responseData) {
 /**
  * Muestra el leaderboard de un quiz
  */
-export async function showLeaderboard(telegram, chatId, surveyId) {
-  const survey = getSurveyById(surveyId);
+export async function showLeaderboard(telegram, chatId, surveyId, botId) {
+  const survey = getSurveyById(surveyId, botId);
   if (!survey || survey.type !== "quiz") {
     await telegram.sendMessage(chatId, "❌ Quiz no encontrado");
     return;
   }
   
-  const leaderboard = getQuizLeaderboard(surveyId, 10);
+  const leaderboard = getQuizLeaderboard(surveyId, 10, botId);
   
   if (leaderboard.length === 0) {
     await telegram.sendMessage(chatId, "📊 Aún no hay participantes en este quiz.");
@@ -470,8 +470,8 @@ export async function showLeaderboard(telegram, chatId, surveyId) {
 /**
  * Maneja el toggle de respuesta múltiple
  */
-export async function handleMultipleChoiceToggle(telegram, userId, chatId, sessionId, questionIndex, optionIndex, messageId) {
-  const session = getSession(sessionId);
+export async function handleMultipleChoiceToggle(telegram, userId, chatId, sessionId, questionIndex, optionIndex, messageId, botId) {
+  const session = getSession(sessionId, botId);
   if (!session) return;
   
   const answers = session.answers || [];
@@ -486,10 +486,10 @@ export async function handleMultipleChoiceToggle(telegram, userId, chatId, sessi
   }
   
   answers[questionIndex] = newAnswers;
-  updateSession(sessionId, { answers });
+  updateSession(sessionId, { answers }, botId);
   
   // Actualizar el mensaje con los nuevos checkboxes
-  const survey = getSurveyById(session.surveyId);
+  const survey = getSurveyById(session.surveyId, botId);
   const question = survey.questions[questionIndex];
   
   const keyboard = { inline_keyboard: [] };
@@ -531,16 +531,16 @@ function formatTime(seconds) {
 /**
  * Maneja respuestas de texto
  */
-export async function handleTextAnswer(telegram, userId, chatId, text) {
-  const session = getUserActiveSession(userId, null);
+export async function handleTextAnswer(telegram, userId, chatId, text, botId) {
+  const session = getUserActiveSession(userId, null, botId);
   if (!session || !session.waitingForText) return false;
   
   const sessionId = session.sessionId;
   const questionIndex = session.currentQuestionIndex;
   
   // Guardar respuesta de texto
-  updateSession(sessionId, { waitingForText: false });
-  await handleSurveyAnswer(telegram, userId, chatId, sessionId, questionIndex, text);
+  updateSession(sessionId, { waitingForText: false }, botId);
+  await handleSurveyAnswer(telegram, userId, chatId, sessionId, questionIndex, text, botId);
   
   return true;
 }

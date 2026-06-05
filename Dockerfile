@@ -11,21 +11,23 @@ RUN apt-get update \
 			tesseract-ocr-spa \
 		&& rm -rf /var/lib/apt/lists/*
 
+# Dependencias del backend (capa cacheada mientras no cambien package*.json).
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
+# Dependencias del admin-ui. Se instalan ANTES de copiar el código para que
+# Docker cachee esta capa: mientras no cambien admin-ui/package*.json, los
+# cambios en src/ NO disparan una reinstalación (build de ~8 min → <1 min).
+# NODE_ENV=development en línea para que npm ci instale las devDependencies
+# (vite, etc.) sin afectar el resto de la imagen, que queda en production.
+COPY admin-ui/package.json admin-ui/package-lock.json ./admin-ui/
+RUN cd admin-ui && NODE_ENV=development npm ci
+
+# Ahora sí, copiar el resto del código.
 COPY . .
 
-# Build admin-ui before starting the server
-# Temporarily set NODE_ENV to development to install devDependencies (vite, etc.)
-WORKDIR /app/admin-ui
-ENV NODE_ENV=development
-RUN npm ci
-RUN npm run build
-
-# Return to app root and reset NODE_ENV to production
-WORKDIR /app
-ENV NODE_ENV=production
+# Build del admin-ui (Vite). Usa las devDependencies ya instaladas arriba.
+RUN cd admin-ui && npm run build
 
 EXPOSE 3000
 CMD ["node", "src/server.js"]

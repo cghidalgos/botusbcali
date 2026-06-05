@@ -1,6 +1,7 @@
 // FAQ Cache Store - Sistema de caché inteligente para respuestas frecuentes
 import fs from "fs";
 import path from "path";
+import { DEFAULT_BOT_ID, normalizeBotId } from "./botContext.js";
 
 const DATA_PATH = path.resolve("data/faq-cache.json");
 const DATA_DIR = path.dirname(DATA_PATH);
@@ -13,7 +14,13 @@ function loadCache() {
   try {
     if (fs.existsSync(DATA_PATH)) {
       const raw = fs.readFileSync(DATA_PATH, "utf8");
-      faqCache = JSON.parse(raw);
+      const parsed = JSON.parse(raw);
+      faqCache = Array.isArray(parsed)
+        ? parsed.map((entry) => ({
+            botId: normalizeBotId(entry?.botId || DEFAULT_BOT_ID),
+            ...entry,
+          }))
+        : [];
     }
   } catch (e) {
     console.error("No se pudo cargar el FAQ cache", e);
@@ -65,15 +72,17 @@ export function cosineSimilarity(vec1, vec2) {
  * @param {number} threshold - Umbral de similitud (default 0.85)
  * @returns {Object|null} - FAQ encontrada o null
  */
-export function findSimilarFAQ(questionEmbedding, threshold = 0.85) {
+export function findSimilarFAQ(questionEmbedding, threshold = 0.85, botId) {
   if (!questionEmbedding) return null;
   
   loadCache();
+  const resolved = normalizeBotId(botId);
   
   let bestMatch = null;
   let bestSimilarity = 0;
   
   for (const faq of faqCache) {
+    if (normalizeBotId(faq?.botId) !== resolved) continue;
     if (!faq.questionEmbedding || !faq.enabled) continue;
     
     const similarity = cosineSimilarity(questionEmbedding, faq.questionEmbedding);
@@ -93,15 +102,18 @@ export function findSimilarFAQ(questionEmbedding, threshold = 0.85) {
 /**
  * Agrega o actualiza una FAQ en el caché
  */
-export function upsertFAQ({ question, answer, questionEmbedding, category, metadata = {} }) {
+export function upsertFAQ({ question, answer, questionEmbedding, category, metadata = {}, botId } = {}) {
   loadCache();
+  const resolved = normalizeBotId(botId);
   
   const normalized = String(question || "").toLowerCase().trim();
   if (!normalized || !answer) return null;
   
   // Buscar si ya existe
   const existingIndex = faqCache.findIndex(
-    (faq) => String(faq.question || "").toLowerCase().trim() === normalized
+    (faq) =>
+      normalizeBotId(faq?.botId) === resolved &&
+      String(faq.question || "").toLowerCase().trim() === normalized
   );
   
   const now = Date.now();
@@ -111,6 +123,7 @@ export function upsertFAQ({ question, answer, questionEmbedding, category, metad
     const existing = faqCache[existingIndex];
     faqCache[existingIndex] = {
       ...existing,
+      botId: resolved,
       answer,
       questionEmbedding: questionEmbedding || existing.questionEmbedding,
       category: category || existing.category,
@@ -125,6 +138,7 @@ export function upsertFAQ({ question, answer, questionEmbedding, category, metad
   
   // Crear nuevo
   const newFAQ = {
+    botId: resolved,
     id: `faq_${now}_${Math.random().toString(36).substr(2, 9)}`,
     question,
     answer,
@@ -146,10 +160,10 @@ export function upsertFAQ({ question, answer, questionEmbedding, category, metad
 /**
  * Incrementa el contador de uso de una FAQ
  */
-export function incrementFAQHit(faqId) {
+export function incrementFAQHit(faqId, botId) {
   loadCache();
-  
-  const faq = faqCache.find((f) => f.id === faqId);
+  const resolved = normalizeBotId(botId);
+  const faq = faqCache.find((f) => f.id === faqId && normalizeBotId(f?.botId) === resolved);
   if (faq) {
     faq.hitCount = (faq.hitCount || 0) + 1;
     faq.lastUsedAt = Date.now();
@@ -160,26 +174,31 @@ export function incrementFAQHit(faqId) {
 /**
  * Obtiene todas las FAQs
  */
-export function getAllFAQs() {
+export function getAllFAQs(botId) {
   loadCache();
-  return faqCache.slice();
+  const resolved = normalizeBotId(botId);
+  return faqCache.filter((faq) => normalizeBotId(faq?.botId) === resolved).slice();
 }
 
 /**
  * Obtiene FAQs por categoría
  */
-export function getFAQsByCategory(category) {
+export function getFAQsByCategory(category, botId) {
   loadCache();
-  return faqCache.filter((faq) => faq.category === category && faq.enabled);
+  const resolved = normalizeBotId(botId);
+  return faqCache.filter(
+    (faq) => normalizeBotId(faq?.botId) === resolved && faq.category === category && faq.enabled
+  );
 }
 
 /**
  * Obtiene las FAQs más populares
  */
-export function getTopFAQs(limit = 10) {
+export function getTopFAQs(limit = 10, botId) {
   loadCache();
+  const resolved = normalizeBotId(botId);
   return faqCache
-    .filter((faq) => faq.enabled)
+    .filter((faq) => normalizeBotId(faq?.botId) === resolved && faq.enabled)
     .sort((a, b) => (b.hitCount || 0) - (a.hitCount || 0))
     .slice(0, limit);
 }
@@ -187,13 +206,14 @@ export function getTopFAQs(limit = 10) {
 /**
  * Actualiza una FAQ
  */
-export function updateFAQ(faqId, updates) {
+export function updateFAQ(faqId, updates, botId) {
   loadCache();
-  
-  const index = faqCache.findIndex((f) => f.id === faqId);
+  const resolved = normalizeBotId(botId);
+  const index = faqCache.findIndex((f) => f.id === faqId && normalizeBotId(f?.botId) === resolved);
   if (index >= 0) {
     faqCache[index] = {
       ...faqCache[index],
+      botId: resolved,
       ...updates,
       updatedAt: Date.now(),
     };
@@ -207,10 +227,10 @@ export function updateFAQ(faqId, updates) {
 /**
  * Elimina una FAQ
  */
-export function deleteFAQ(faqId) {
+export function deleteFAQ(faqId, botId) {
   loadCache();
-  
-  const index = faqCache.findIndex((f) => f.id === faqId);
+  const resolved = normalizeBotId(botId);
+  const index = faqCache.findIndex((f) => f.id === faqId && normalizeBotId(f?.botId) === resolved);
   if (index >= 0) {
     faqCache.splice(index, 1);
     persistCache();
@@ -223,21 +243,22 @@ export function deleteFAQ(faqId) {
 /**
  * Habilita/deshabilita una FAQ
  */
-export function toggleFAQ(faqId, enabled) {
-  return updateFAQ(faqId, { enabled });
+export function toggleFAQ(faqId, enabled, botId) {
+  return updateFAQ(faqId, { enabled }, botId);
 }
 
 /**
  * Obtiene estadísticas del caché
  */
-export function getFAQStats() {
+export function getFAQStats(botId) {
   loadCache();
-  
-  const enabled = faqCache.filter((faq) => faq.enabled);
-  const totalHits = faqCache.reduce((sum, faq) => sum + (faq.hitCount || 0), 0);
+  const resolved = normalizeBotId(botId);
+  const scoped = faqCache.filter((faq) => normalizeBotId(faq?.botId) === resolved);
+  const enabled = scoped.filter((faq) => faq.enabled);
+  const totalHits = scoped.reduce((sum, faq) => sum + (faq.hitCount || 0), 0);
   
   const categories = {};
-  for (const faq of faqCache) {
+  for (const faq of scoped) {
     const cat = faq.category || "general";
     if (!categories[cat]) {
       categories[cat] = { count: 0, hits: 0 };
@@ -247,7 +268,7 @@ export function getFAQStats() {
   }
   
   return {
-    total: faqCache.length,
+    total: scoped.length,
     enabled: enabled.length,
     totalHits,
     categories,

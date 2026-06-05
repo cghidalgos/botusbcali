@@ -1,5 +1,6 @@
 import fs from "fs/promises";
 import path from "path";
+import { DEFAULT_BOT_ID, normalizeBotId } from "./botContext.js";
 
 const dataDir = path.resolve(process.cwd(), "data");
 const usersPath = path.join(dataDir, "telegramUsers.json");
@@ -15,7 +16,11 @@ async function loadUsers() {
     const raw = await fs.readFile(usersPath, "utf8");
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed)) {
-      userStore.splice(0, userStore.length, ...parsed);
+      const normalized = parsed.map((user) => ({
+        botId: normalizeBotId(user?.botId || DEFAULT_BOT_ID),
+        ...user,
+      }));
+      userStore.splice(0, userStore.length, ...normalized);
     }
   } catch (error) {
     if (error?.code !== "ENOENT") {
@@ -35,24 +40,30 @@ async function persistUsers() {
 
 export const usersReady = loadUsers();
 
-export function listTelegramUsers() {
-  return userStore.map((u) => ({ ...u }));
+export function listTelegramUsers(botId) {
+  const resolved = normalizeBotId(botId);
+  return userStore
+    .filter((u) => normalizeBotId(u?.botId) === resolved)
+    .map((u) => ({ ...u }));
 }
 
-export function getTelegramUser(chatId) {
+export function getTelegramUser(chatId, botId) {
   const key = String(chatId);
-  return userStore.find((u) => String(u.chatId) === key) ?? null;
+  const resolved = normalizeBotId(botId);
+  return userStore.find((u) => String(u.chatId) === key && normalizeBotId(u?.botId) === resolved) ?? null;
 }
 
-export function upsertTelegramUser({ chatId, username, firstName, lastName, type } = {}) {
+export function upsertTelegramUser({ chatId, username, firstName, lastName, type, botId } = {}) {
   const key = String(chatId);
   if (!key || key === "undefined" || key === "null") return null;
+  const resolved = normalizeBotId(botId);
 
   const now = new Date().toISOString();
-  let user = userStore.find((u) => String(u.chatId) === key);
+  let user = userStore.find((u) => String(u.chatId) === key && normalizeBotId(u?.botId) === resolved);
   if (!user) {
     user = {
       chatId: key,
+      botId: resolved,
       username: username ? String(username) : "",
       firstName: firstName ? String(firstName) : "",
       lastName: lastName ? String(lastName) : "",
@@ -81,10 +92,11 @@ export function upsertTelegramUser({ chatId, username, firstName, lastName, type
   return { ...user };
 }
 
-export function markTelegramUserBlocked(chatId, errorMessage = "") {
+export function markTelegramUserBlocked(chatId, errorMessage = "", botId) {
   const key = String(chatId);
+  const resolved = normalizeBotId(botId);
   const now = new Date().toISOString();
-  const user = userStore.find((u) => String(u.chatId) === key);
+  const user = userStore.find((u) => String(u.chatId) === key && normalizeBotId(u?.botId) === resolved);
   if (!user) return null;
   user.isBlocked = true;
   user.blockedAt = user.blockedAt || now;
@@ -94,10 +106,11 @@ export function markTelegramUserBlocked(chatId, errorMessage = "") {
   return { ...user };
 }
 
-export function markTelegramUserError(chatId, errorMessage = "") {
+export function markTelegramUserError(chatId, errorMessage = "", botId) {
   const key = String(chatId);
+  const resolved = normalizeBotId(botId);
   const now = new Date().toISOString();
-  const user = userStore.find((u) => String(u.chatId) === key);
+  const user = userStore.find((u) => String(u.chatId) === key && normalizeBotId(u?.botId) === resolved);
   if (!user) return null;
   user.lastError = errorMessage ? String(errorMessage) : user.lastError;
   user.updatedAt = now;
@@ -105,9 +118,10 @@ export function markTelegramUserError(chatId, errorMessage = "") {
   return { ...user };
 }
 
-export function removeTelegramUser(chatId) {
+export function removeTelegramUser(chatId, botId) {
   const key = String(chatId);
-  const idx = userStore.findIndex((u) => String(u.chatId) === key);
+  const resolved = normalizeBotId(botId);
+  const idx = userStore.findIndex((u) => String(u.chatId) === key && normalizeBotId(u?.botId) === resolved);
   if (idx === -1) return false;
   userStore.splice(idx, 1);
   persistUsers();

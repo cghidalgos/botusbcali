@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { MessageSquare, Pencil, Save } from "lucide-react";
+import { MessageSquare, Pencil, Save, RotateCcw } from "lucide-react";
 import { getConfig, updateConfig, type ContextData } from "@/lib/api";
 
 const ContextPanel = () => {
@@ -12,6 +12,24 @@ const ContextPanel = () => {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Resetear contexto a valores vacíos
+  const handleResetContext = async () => {
+    if (!window.confirm("¿Seguro que deseas resetear el contexto? Esta acción no se puede deshacer.")) return;
+    try {
+      setSaving(true);
+      setError(null);
+      const emptyContext = { activePrompt: "", additionalNotes: "" };
+      const updated = await updateConfig(emptyContext);
+      setContext(emptyContext);
+      setSaved(updated);
+      setEditing(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "No se pudo resetear el contexto.");
+    } finally {
+      setSaving(false);
+    }
+  };
 
   useEffect(() => {
     let active = true;
@@ -79,10 +97,16 @@ const ContextPanel = () => {
             onChange={(e) => setContext({ ...context, additionalNotes: e.target.value })}
           />
 
-          <button type="submit" className="btn-primary mt-4 w-full" disabled={saving}>
-            <Save className="w-4 h-4 mr-2" />
-            {saving ? "Guardando..." : "Guardar contexto"}
-          </button>
+          <div className="flex gap-2 mt-4">
+            <button type="submit" className="btn-primary flex-1" disabled={saving}>
+              <Save className="w-4 h-4 mr-2" />
+              {saving ? "Guardando..." : "Guardar contexto"}
+            </button>
+            <button type="button" className="btn-danger flex-1" onClick={handleResetContext} disabled={saving}>
+              <RotateCcw className="w-4 h-4 mr-2" />
+              {saving ? "Reseteando..." : "Resetear contexto"}
+            </button>
+          </div>
         </form>
       ) : (
         <div className="preview-box">
@@ -95,14 +119,25 @@ const ContextPanel = () => {
           <p className="preview-label">Notas adicionales</p>
           <p className="preview-value">{saved?.additionalNotes || "(Sin notas adicionales)"}</p>
 
-          <button
-            type="button"
-            className="btn-secondary mt-4 w-full"
-            onClick={() => setEditing(true)}
-          >
-            <Pencil className="w-4 h-4 mr-2" />
-            Editar contexto
-          </button>
+          <div className="flex gap-2 mt-4">
+            <button
+              type="button"
+              className="btn-secondary flex-1"
+              onClick={() => setEditing(true)}
+            >
+              <Pencil className="w-4 h-4 mr-2" />
+              Editar contexto
+            </button>
+            <button
+              type="button"
+              className="btn-danger flex-1"
+              onClick={handleResetContext}
+              disabled={saving}
+            >
+              <RotateCcw className="w-4 h-4 mr-2" />
+              {saving ? "Reseteando..." : "Resetear contexto"}
+            </button>
+          </div>
         </div>
       )}
     </div>
