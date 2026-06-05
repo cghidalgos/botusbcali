@@ -112,6 +112,7 @@ export function createTelegramService({ token, delayBetweenPartsMs = 0, maxMessa
       sendDocument: mockError,
       answerCallbackQuery: mockError,
       editMessageReplyMarkup: mockError,
+      getFileLink: mockError,
       sendChatAction: async () => {},
     };
   }
@@ -319,6 +320,16 @@ export function createTelegramService({ token, delayBetweenPartsMs = 0, maxMessa
     );
   }
 
+  // Resuelve la URL de descarga de un archivo de Telegram (voz, foto, documento)
+  // a partir de su file_id. Necesario para transcribir notas de voz.
+  async function getFileLink(fileId) {
+    if (!fileId) return null;
+    const data = await postWithRetry("getFile", { file_id: fileId }, {}, { maxRetries: 1 });
+    const filePath = data?.result?.file_path;
+    if (!filePath) return null;
+    return `https://api.telegram.org/file/bot${resolvedToken}/${filePath}`;
+  }
+
   // Muestra el indicador "escribiendo..." en el chat. No reintenta: es efímero
   // y no debe bloquear ni retrasar la respuesta real.
   async function sendChatAction(chatId, action = "typing") {
@@ -343,6 +354,7 @@ export function createTelegramService({ token, delayBetweenPartsMs = 0, maxMessa
     sendDocument,
     answerCallbackQuery,
     editMessageReplyMarkup,
+    getFileLink,
     sendChatAction,
   };
 }

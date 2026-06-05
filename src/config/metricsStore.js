@@ -61,6 +61,8 @@ function getDailyEntry(botId, dateKey) {
         requests: 0,
         promptTokens: 0,
         completionTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
         totalTokens: 0,
         estimatedCost: 0,
       },
@@ -99,15 +101,28 @@ export async function recordChatCompletionUsage(botId, usage = {}) {
   const entry = getDailyEntry(botId, dateKey);
   const promptTokens = Number(usage.prompt_tokens || 0);
   const completionTokens = Number(usage.completion_tokens || 0);
-  const totalTokens = Number(usage.total_tokens || promptTokens + completionTokens || 0);
+  const cacheReadTokens = Number(usage.cache_read_tokens || 0);
+  const cacheCreationTokens = Number(usage.cache_creation_tokens || 0);
+  const totalTokens = Number(
+    usage.total_tokens ||
+      promptTokens + completionTokens + cacheReadTokens + cacheCreationTokens ||
+      0
+  );
   const rates = getCostRates();
+  // Multiplicadores de prompt caching de Anthropic: escribir a caché cuesta
+  // 1.25x el precio de entrada; leer de caché cuesta 0.1x. Incluirlos hace que
+  // estimatedCost refleje el efecto real del caché.
   const cost =
     (promptTokens / 1_000_000) * rates.prompt +
+    (cacheCreationTokens / 1_000_000) * rates.prompt * 1.25 +
+    (cacheReadTokens / 1_000_000) * rates.prompt * 0.1 +
     (completionTokens / 1_000_000) * rates.completion;
 
   entry.openai.requests += 1;
   entry.openai.promptTokens += promptTokens;
   entry.openai.completionTokens += completionTokens;
+  entry.openai.cacheReadTokens = (entry.openai.cacheReadTokens || 0) + cacheReadTokens;
+  entry.openai.cacheCreationTokens = (entry.openai.cacheCreationTokens || 0) + cacheCreationTokens;
   entry.openai.totalTokens += totalTokens;
   entry.openai.estimatedCost = Number((entry.openai.estimatedCost + cost).toFixed(6));
   entry.answers += 1;
@@ -172,6 +187,8 @@ export function getMetricsOverview(botId, days = 7) {
         requests: 0,
         promptTokens: 0,
         completionTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
         totalTokens: 0,
         estimatedCost: 0,
       },

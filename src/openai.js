@@ -1328,7 +1328,13 @@ export async function composeResponse({ incomingText, context, documents, chatId
     await recordChatCompletionUsage(resolvedBotId, {
       prompt_tokens: response.usage.input_tokens || 0,
       completion_tokens: response.usage.output_tokens || 0,
-      total_tokens: (response.usage.input_tokens || 0) + (response.usage.output_tokens || 0),
+      cache_read_tokens: response.usage.cache_read_input_tokens || 0,
+      cache_creation_tokens: response.usage.cache_creation_input_tokens || 0,
+      total_tokens:
+        (response.usage.input_tokens || 0) +
+        (response.usage.output_tokens || 0) +
+        (response.usage.cache_read_input_tokens || 0) +
+        (response.usage.cache_creation_input_tokens || 0),
     });
   }
   await recordQuestion(resolvedBotId, rawQuestion);
@@ -1448,7 +1454,13 @@ export async function suggestFollowUps({ question, answer, botId, claudeApiKey, 
       await recordChatCompletionUsage(resolvedBotId, {
         prompt_tokens: response.usage.input_tokens || 0,
         completion_tokens: response.usage.output_tokens || 0,
-        total_tokens: (response.usage.input_tokens || 0) + (response.usage.output_tokens || 0),
+        cache_read_tokens: response.usage.cache_read_input_tokens || 0,
+        cache_creation_tokens: response.usage.cache_creation_input_tokens || 0,
+        total_tokens:
+          (response.usage.input_tokens || 0) +
+          (response.usage.output_tokens || 0) +
+          (response.usage.cache_read_input_tokens || 0) +
+          (response.usage.cache_creation_input_tokens || 0),
       });
     }
     const raw = response.content?.[0]?.text || "";
@@ -1568,7 +1580,13 @@ export async function suggestImprovedAnswer({ question, documents = [], context 
       await recordChatCompletionUsage(resolvedBotId, {
         prompt_tokens: response.usage.input_tokens || 0,
         completion_tokens: response.usage.output_tokens || 0,
-        total_tokens: (response.usage.input_tokens || 0) + (response.usage.output_tokens || 0),
+        cache_read_tokens: response.usage.cache_read_input_tokens || 0,
+        cache_creation_tokens: response.usage.cache_creation_input_tokens || 0,
+        total_tokens:
+          (response.usage.input_tokens || 0) +
+          (response.usage.output_tokens || 0) +
+          (response.usage.cache_read_input_tokens || 0) +
+          (response.usage.cache_creation_input_tokens || 0),
       });
     }
     const answer = response.content?.[0]?.text?.trim() || "";

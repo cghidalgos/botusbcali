@@ -38,6 +38,7 @@ import { rememberFollowUps, getFollowUps } from "./config/followUpStore.js";
 import { chunkText, embedChunks, embedChunkDescriptors } from "./embeddings.js";
 import { chunkByStructure, extractHtmlSectionsFromHtml } from "./structuredChunking.js";
 import { createTelegramService, classifyTelegramSendError } from "./services/telegramService.js";
+import { transcribeAudioFromUrl } from "./services/transcriptionService.js";
 import { getLearningPatterns, addLearningPattern, updateLearningPattern, deleteLearningPattern, getLearningStats, learningReady } from "./config/learningStore.js";
 import { getCategories, addCategory, deleteCategory, updateCategory, getSuggestedCategories, getSuggestedCategoriesPending, approveSuggestedCategory, rejectSuggestedCategory, updateSuggestedCategory, categoriesReady } from "./config/categoriesStore.js";
 import { getCacheStats, recordCacheHit, recordCacheEntry, cacheReady } from "./config/cacheStore.js";
@@ -995,7 +996,29 @@ async function handleWebhook(req, res, botId) {
   
   // Manejar mensajes de texto
   const message = update.message ?? update.edited_message;
-  const text = message?.text?.trim();
+  let text = message?.text?.trim();
+
+  // Notas de voz: transcribir con Whisper y continuar el flujo normal como si el
+  // usuario lo hubiera escrito. Usa la misma OPENAI_API_KEY de los embeddings.
+  if (!text && message?.voice && message.chat?.id) {
+    try {
+      await telegram.sendChatAction(message.chat.id, "typing");
+      const fileLink = await telegram.getFileLink(message.voice.file_id);
+      text = (await transcribeAudioFromUrl(fileLink)).trim();
+    } catch (voiceError) {
+      console.error("Transcripción de voz falló", voiceError?.message || voiceError);
+    }
+    if (text) {
+      // Eco de lo entendido para que el usuario pueda verificar o corregir.
+      await telegram.sendMessage(message.chat.id, `🎤 Entendí: "${text}"`);
+    } else {
+      await telegram.sendMessage(
+        message.chat.id,
+        "No pude entender la nota de voz 😕. ¿Puedes escribirla o intentar de nuevo?"
+      );
+      return res.sendStatus(200);
+    }
+  }
 
   if (!message || !message.chat?.id || !text) {
     return res.sendStatus(200);
